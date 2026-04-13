@@ -1,0 +1,52 @@
+# Environment variables — never commit secrets
+.env
+.env.*
+
+# SSH keys & certificates
+*.pem
+*.key
+*.p12
+*.pfx
+server/uploads/
+
+# macOS
+.DS_Store
+.AppleDouble
+
+# Editor
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.venv/
+
+# Node
+node_modules/
+.pnp
+.pnp.*
+.next/
+out/
+*.tsbuildinfo
+next-env.d.ts
+.vercel
+
+# Logs
+*.log
+logs/
+
+# Uploads & temp files
+server/uploads/
+/tmp/
+*.parquet
+*.duckdb
+*.duckdb.wal
+
+# Test data (large files)
+server/testing/*.csv
+server/testing/*.parquet
