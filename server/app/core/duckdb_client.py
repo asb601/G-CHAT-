@@ -28,6 +28,7 @@ def _get_connection(connection_string: str) -> duckdb.DuckDBPyConnection:
     if key not in cache:
         conn = duckdb.connect()
         conn.execute("INSTALL azure; LOAD azure;")
+        conn.execute("SET http_ca_file='/etc/ssl/certs/ca-certificates.crt';")
         safe_conn = connection_string.replace("'", "''")
         conn.execute(f"SET azure_storage_connection_string='{safe_conn}';")
         cache[key] = conn
