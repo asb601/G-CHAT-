@@ -4,12 +4,11 @@ import os
 import threading
 import time
 
-# DuckDB's Azure extension bundles its own libcurl on Linux — set CA cert path
-# before DuckDB loads so the bundled curl can verify Azure Blob SSL certs.
 _CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
 if os.path.exists(_CA_BUNDLE):
-    os.environ.setdefault("CURL_CA_BUNDLE", _CA_BUNDLE)
-    os.environ.setdefault("SSL_CERT_FILE", _CA_BUNDLE)
+    os.environ["CURL_CA_BUNDLE"] = _CA_BUNDLE
+    os.environ["SSL_CERT_FILE"] = _CA_BUNDLE
+    os.environ["REQUESTS_CA_BUNDLE"] = _CA_BUNDLE
 
 import duckdb
 
@@ -20,14 +19,10 @@ def _ms(start: float) -> float:
     return round((time.perf_counter() - start) * 1000, 2)
 
 
-# ── Thread-local connection cache ─────────────────────────────────────────────
-# Each worker thread gets its own DuckDB connection, reused across calls.
-# INSTALL/LOAD azure runs only once per thread — not once per query.
 _thread_local = threading.local()
 
 
 def _get_connection(connection_string: str) -> duckdb.DuckDBPyConnection:
-    """Return a cached DuckDB connection for the current thread."""
     key = hashlib.md5(connection_string.encode()).hexdigest()
     cache: dict = getattr(_thread_local, "connections", None)
     if cache is None:
@@ -35,7 +30,9 @@ def _get_connection(connection_string: str) -> duckdb.DuckDBPyConnection:
         cache = _thread_local.connections
     if key not in cache:
         conn = duckdb.connect()
-        conn.execute("INSTALL azure; LOAD azure;")
+        conn.execute("INSTALL azure;")
+        conn.execute("LOAD azure;")
+        conn.execute("SET azure_transport_option_type = 'curl';")
         safe_conn = connection_string.replace("'", "''")
         conn.execute(f"SET azure_storage_connection_string='{safe_conn}';")
         cache[key] = conn
@@ -43,7 +40,6 @@ def _get_connection(connection_string: str) -> duckdb.DuckDBPyConnection:
 
 
 def _clear_connection(connection_string: str) -> None:
-    """Evict a potentially corrupted connection so the next call recreates it."""
     key = hashlib.md5(connection_string.encode()).hexdigest()
     cache: dict = getattr(_thread_local, "connections", {})
     cache.pop(key, None)
@@ -52,11 +48,6 @@ def _clear_connection(connection_string: str) -> None:
 async def sample_file(
     blob_path: str, connection_string: str, container_name: str
 ) -> dict:
-    """
-    Read first 500 rows from a CSV/TXT in Azure Blob via DuckDB.
-    COUNT(*) is skipped — uses sample size as row count to avoid full-file scans.
-    """
-
     def _run() -> dict:
         try:
             conn = _get_connection(connection_string)
@@ -89,7 +80,6 @@ async def sample_file(
                 )
 
             def _json_safe(rows: list[dict]) -> list[dict]:
-                """Convert any non-JSON-serializable values (Timestamp, etc.) to strings."""
                 safe = []
                 for row in rows:
                     safe.append({
@@ -129,12 +119,6 @@ async def sample_file(
 async def execute_query(
     sql: str, connection_string: str, timeout_seconds: int = 30
 ) -> list[dict]:
-    """
-    Execute DuckDB SQL against Azure Blob.
-    Raises on failure — caller handles retry.
-    Default timeout reduced to 30s to keep chat responsive.
-    """
-
     def _run() -> list[dict]:
         try:
             conn = _get_connection(connection_string)
@@ -170,10 +154,6 @@ def _resolve_data_path(
     blob_path: str, connection_string: str, container_name: str,
     parquet_blob_path: str | None,
 ) -> str:
-    """
-    Return the fastest read path for a file.
-    Prefer Parquet if available, fall back to CSV.
-    """
     if parquet_blob_path:
         return f"az://{container_name}/{parquet_blob_path}"
     return f"az://{container_name}/{blob_path}"

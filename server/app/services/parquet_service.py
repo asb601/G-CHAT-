@@ -24,6 +24,7 @@ import os
 import tempfile
 import time
 
+import pyarrow.csv as pa_csv
 import pyarrow.parquet as pq
 from azure.storage.blob import BlobServiceClient
 
