@@ -32,7 +32,6 @@ def build_sql_tools(
         Do NOT write 'blob_path' literally as a filename — use the real path from the catalog.
         Always LIMIT results (max 1000 rows). Use TRY_CAST for date columns.
         Use run_aggregation for GROUP BY summaries — it is faster.
-        If this times out, use query_sample_rows to get rows from the stored sample.
         Returns row count, column names, 5-row preview, and stores full results."""
         sql_upper = sql.strip().upper()
         for bad in ("DROP ", "DELETE ", "UPDATE ", "INSERT ", "CREATE ", "ALTER ", "TRUNCATE "):
@@ -57,7 +56,7 @@ def build_sql_tools(
                 "note": f"Full {len(rows)} rows in memory for the final answer.",
             }, default=str)
         except asyncio.TimeoutError:
-            return json.dumps({"error": "Query timed out after 120 seconds. Try query_sample_rows for instant row access, or use run_aggregation for aggregated summaries."})
+            return json.dumps({"error": "Query timed out after 120 seconds."})
         except Exception as exc:
             return json.dumps({"error": str(exc)[:500]})
 

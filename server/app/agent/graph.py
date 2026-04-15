@@ -244,7 +244,7 @@ async def run_agent_query(query: str, db: AsyncSession) -> dict:
 
     sample_note = ""
     if sample_rows:
-        sample_note = f"\nSample rows available: {len(sample_rows)} rows stored from ingest — use query_sample_rows() for instant row access without SQL."
+        sample_note = f"\nIngest-time sample available: {len(sample_rows)} rows (first rows of the file) — query_sample_rows() gives instant access to these."
 
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
         container_name=container_name,
