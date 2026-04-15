@@ -25,8 +25,14 @@ def build_analytics_tool(precomputed: dict | None) -> list:
 
         # Row/column counts
         if any(kw in q for kw in ("row", "record", "count", "size")):
-            result["row_count"] = precomputed.get("row_count")
+            rc = precomputed.get("row_count")
+            result["row_count"] = rc
             result["column_count"] = precomputed.get("column_count")
+            if rc is not None and rc <= 500:
+                result["row_count_note"] = (
+                    "This is a sample estimate (max 500 rows were scanned at ingest time). "
+                    "The actual file is much larger. Run COUNT(*) SQL for the exact number."
+                )
 
         # Per-column stats
         col_stats = precomputed.get("column_stats") or {}

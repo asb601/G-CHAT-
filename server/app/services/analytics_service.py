@@ -219,6 +219,7 @@ async def trigger_parquet_conversion(
         result = await convert_csv_to_parquet(blob_path, connection_string, container_name, job_id=job_id)
         parquet_path = result["parquet_blob_path"]
         parquet_size = result["size_bytes"]
+        total_rows = result.get("total_rows")
 
         # ── Update analytics + mark job done ──
         async with _async_session() as db:
@@ -228,6 +229,16 @@ async def trigger_parquet_conversion(
             if analytics_row:
                 analytics_row.parquet_blob_path = parquet_path
                 analytics_row.parquet_size_bytes = parquet_size
+                if total_rows:
+                    analytics_row.row_count = total_rows
+
+            # Also update FileMetadata.row_count so the agent sees the real count
+            if total_rows:
+                meta_row = (await db.execute(
+                    select(FileMetadata).where(FileMetadata.file_id == file_id)
+                )).scalar_one_or_none()
+                if meta_row:
+                    meta_row.row_count = total_rows
 
             job_row = await db.get(BackgroundJob, job_id)
             if job_row:
@@ -238,7 +249,7 @@ async def trigger_parquet_conversion(
 
         ingest_logger.info("parquet_conversion", status="done",
                            blob_path=blob_path, parquet_path=parquet_path,
-                           size_bytes=parquet_size, job_id=job_id)
+                           size_bytes=parquet_size, total_rows=total_rows, job_id=job_id)
 
     except Exception as exc:
         error_msg = str(exc)[:1000]

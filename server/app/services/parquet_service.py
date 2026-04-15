@@ -311,7 +311,7 @@ def _run_conversion(
         if job_id:
             _PROGRESS.pop(job_id, None)  # clean up — job is done
 
-        return {"parquet_blob_path": parquet_blob_path, "size_bytes": parquet_size_bytes}
+        return {"parquet_blob_path": parquet_blob_path, "size_bytes": parquet_size_bytes, "total_rows": total_rows}
 
     finally:
         # Always clean up temp files — even on failure
