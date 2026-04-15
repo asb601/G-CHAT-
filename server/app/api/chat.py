@@ -14,7 +14,6 @@ from app.models.file import File
 from app.models.file_metadata import FileMetadata
 from app.models.user import User
 from app.agent import run_agent_query
-from app.services.query_router import classify_intent, answer_from_metadata, answer_from_precomputed
 from app.services.ingestion_service import ingest_file
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -53,15 +52,10 @@ async def chat_message(
     chat_logger.info("chain_start", user_id=user.id, query=query[:200])
 
     try:
-        intent = classify_intent(query)
+        intent = "agent"
         chat_logger.info("query_routed", intent=intent, query=query[:200])
 
-        if intent == "metadata":
-            result = await answer_from_metadata(query, db)
-        elif intent == "precomputed":
-            result = await answer_from_precomputed(query, db)
-        else:
-            result = await run_agent_query(query, db)
+        result = await run_agent_query(query, db)
 
         chat_logger.info("chain_end", outcome="success",
                          route=result.get("route", intent),
