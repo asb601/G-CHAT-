@@ -238,23 +238,27 @@ async def run_agent_query(query: str, db: AsyncSession) -> dict:
     # ── System prompt ──
     parquet_note = ""
     if parquet_paths_all:
-        lines = [f"  {csv} → {pq}" for csv, pq in parquet_paths_all.items()]
+        lines = [
+            f"  ready-to-use: read_parquet('az://{container_name}/{pq}')"
+            for pq in parquet_paths_all.values()
+        ]
         parquet_note = (
-            "Parquet files available — use read_parquet() for ALL queries needing exact results,"
-            " ordering, filtering, or counts on the full dataset:\n" + "\n".join(lines)
+            "Parquet paths (use these directly in run_sql — no search_catalog needed):\n"
+            + "\n".join(lines)
+            + "\nParquet covers the FULL dataset. Use it for any ordering, filtering, counting, or row retrieval."
         )
     elif parquet_blob_path:
         parquet_note = (
-            f"Parquet file available: {parquet_blob_path}\n"
-            "Use read_parquet() for ALL queries needing exact results, ordering, filtering,"
-            " or counts on the full dataset. This covers every row in the file."
+            f"Parquet path (use directly in run_sql — no search_catalog needed):\n"
+            f"  ready-to-use: read_parquet('az://{container_name}/{parquet_blob_path}')\n"
+            "Parquet covers the FULL dataset. Use it for any ordering, filtering, counting, or row retrieval."
         )
 
     sample_note = ""
     if sample_rows:
         sample_note = (
-            f"\nIngest-time sample: {len(sample_rows)} rows from the start of the file."
-            " query_sample_rows() is instant but only sees these rows — use SQL for anything else."
+            f"\nIngest-time sample: {len(sample_rows)} rows from the start of the file only."
+            " query_sample_rows() is instant but limited to these rows."
         )
 
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(

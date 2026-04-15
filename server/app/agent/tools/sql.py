@@ -26,12 +26,10 @@ def build_sql_tools(
     @tool
     def run_sql(sql: str) -> str:
         """Execute a DuckDB SQL query against Azure Blob Storage files.
-        IMPORTANT: Get the actual blob path from search_catalog or get_file_schema first.
-        CSV syntax:     read_csv_auto('az://CONTAINER/actual_filename.csv')
-        Parquet syntax: read_parquet('az://CONTAINER/actual_filename.parquet')
-        Do NOT write 'blob_path' literally as a filename — use the real path from the catalog.
+        The ready-to-use parquet path is in the system prompt — use it directly.
+        Parquet syntax: read_parquet('az://CONTAINER/filename.parquet')
+        CSV syntax:     read_csv_auto('az://CONTAINER/filename.csv')
         Always LIMIT results (max 1000 rows). Use TRY_CAST for date columns.
-        Use run_aggregation for GROUP BY summaries — it is faster.
         Returns row count, column names, 5-row preview, and stores full results."""
         sql_upper = sql.strip().upper()
         for bad in ("DROP ", "DELETE ", "UPDATE ", "INSERT ", "CREATE ", "ALTER ", "TRUNCATE "):
