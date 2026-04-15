@@ -224,10 +224,11 @@ async def run_agent_query(query: str, db: AsyncSession) -> dict:
         _request_stores[req_id] = store
 
     # ── Build tools for this request ──
+    # SQL tools listed first so the agent considers full-dataset queries before sample fallback
     all_tools = []
+    all_tools.extend(build_sql_tools(connection_string, container_name, parquet_blob_path, store))
     all_tools.extend(build_analytics_tool(precomputed))
     all_tools.extend(build_catalog_tools(catalog, relationships))
-    all_tools.extend(build_sql_tools(connection_string, container_name, parquet_blob_path, store))
     all_tools.extend(build_stats_tool(store))
     all_tools.extend(build_sample_tool(sample_rows))
 
@@ -238,13 +239,23 @@ async def run_agent_query(query: str, db: AsyncSession) -> dict:
     parquet_note = ""
     if parquet_paths_all:
         lines = [f"  {csv} → {pq}" for csv, pq in parquet_paths_all.items()]
-        parquet_note = "Parquet files available (prefer read_parquet() for speed):\n" + "\n".join(lines)
+        parquet_note = (
+            "Parquet files available — use read_parquet() for ALL queries needing exact results,"
+            " ordering, filtering, or counts on the full dataset:\n" + "\n".join(lines)
+        )
     elif parquet_blob_path:
-        parquet_note = f"\nParquet file available: {parquet_blob_path} — prefer read_parquet() for faster queries."
+        parquet_note = (
+            f"Parquet file available: {parquet_blob_path}\n"
+            "Use read_parquet() for ALL queries needing exact results, ordering, filtering,"
+            " or counts on the full dataset. This covers every row in the file."
+        )
 
     sample_note = ""
     if sample_rows:
-        sample_note = f"\nIngest-time sample available: {len(sample_rows)} rows (first rows of the file) — query_sample_rows() gives instant access to these."
+        sample_note = (
+            f"\nIngest-time sample: {len(sample_rows)} rows from the start of the file."
+            " query_sample_rows() is instant but only sees these rows — use SQL for anything else."
+        )
 
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
         container_name=container_name,
