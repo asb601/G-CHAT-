@@ -1,7 +1,15 @@
 import asyncio
 import hashlib
+import os
 import threading
 import time
+
+# DuckDB's Azure extension bundles its own libcurl on Linux — set CA cert path
+# before DuckDB loads so the bundled curl can verify Azure Blob SSL certs.
+_CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
+if os.path.exists(_CA_BUNDLE):
+    os.environ.setdefault("CURL_CA_BUNDLE", _CA_BUNDLE)
+    os.environ.setdefault("SSL_CERT_FILE", _CA_BUNDLE)
 
 import duckdb
 
@@ -28,7 +36,6 @@ def _get_connection(connection_string: str) -> duckdb.DuckDBPyConnection:
     if key not in cache:
         conn = duckdb.connect()
         conn.execute("INSTALL azure; LOAD azure;")
-        conn.execute("SET http_ca_file='/etc/ssl/certs/ca-certificates.crt';")
         safe_conn = connection_string.replace("'", "''")
         conn.execute(f"SET azure_storage_connection_string='{safe_conn}';")
         cache[key] = conn
