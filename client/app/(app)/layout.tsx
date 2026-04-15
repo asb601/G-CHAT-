@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { MessageSquare, FolderOpen, LogOut, PanelLeftClose, PanelLeft, Database, UserCircle } from "lucide-react";
 import { NavLink, MobileNavLink } from "@/components/nav-link";
 import { AuthProvider, useAuth } from "@/components/auth-provider";
@@ -17,6 +17,12 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
+  useEffect(() => {
+    if (!loading && !user) {
+      router.replace("/login");
+    }
+  }, [loading, user, router]);
+
   if (loading) {
     return (
       <div className="flex h-screen items-center justify-center bg-background">
@@ -26,7 +32,6 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
   }
 
   if (!user) {
-    router.replace("/login");
     return null;
   }
 

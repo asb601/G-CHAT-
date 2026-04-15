@@ -1,4 +1,4 @@
-# Environment variables — never commit secrets
+git clone https://github.com/asb601/G-CHAT-.git# Environment variables — never commit secrets
 .env
 .env.*
 
