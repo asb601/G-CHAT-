@@ -15,7 +15,7 @@ def build_catalog_tools(
     def search_catalog(query: str) -> str:
         """Search the ingested file catalog to find files relevant to the user's question.
         Returns file paths, descriptions, columns, and what they are good for.
-        Call this first before querying data."""
+        Use when you need to discover which file to query or what columns are available."""
         if not catalog:
             return json.dumps({"error": "No files have been ingested yet."})
 

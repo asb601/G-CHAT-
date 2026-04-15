@@ -10,60 +10,24 @@ def build_analytics_tool(precomputed: dict | None) -> list:
 
     @tool
     def query_precomputed_analytics(question: str) -> str:
-        """Look up pre-computed statistics for the file without running any SQL.
-        This is INSTANT and should be tried FIRST for questions about:
-        - totals, averages, min, max, standard deviation
-        - value distributions (e.g., count by status, by category)
-        - cross-tab summaries (e.g., sum of amount by region)
-        - row counts, column counts
-        Returns the matching pre-computed data."""
+        """Return pre-computed schema stats captured from a 500-row sample at ingest time.
+        Useful for understanding column types, value ranges, and what categories/values exist.
+        WARNING: All counts and totals in this data are from a 500-row sample only —
+        they do NOT reflect the full dataset. For accurate counts, totals, or any
+        aggregation on the full data, use run_sql with the parquet path instead."""
         if not precomputed:
             return json.dumps({"error": "No pre-computed analytics available for this file."})
 
-        q = question.lower()
-        result: dict = {}
-
-        # Row/column counts
-        if any(kw in q for kw in ("row", "record", "count", "size")):
-            rc = precomputed.get("row_count")
-            result["row_count"] = rc
-            result["column_count"] = precomputed.get("column_count")
-            if rc is not None and rc <= 500:
-                result["row_count_note"] = (
-                    "This is a sample estimate (max 500 rows were scanned at ingest time). "
-                    "The actual file is much larger. Run COUNT(*) SQL for the exact number."
-                )
-
-        # Per-column stats
         col_stats = precomputed.get("column_stats") or {}
-        if any(kw in q for kw in ("average", "mean", "total", "sum", "min", "max", "std", "stats", "statistic")):
-            result["column_stats"] = col_stats
-
-        # Value distributions
         value_counts = precomputed.get("value_counts") or {}
-        if any(kw in q for kw in ("distribution", "breakdown", "by ", "value count", "unique", "category", "status", "region", "country", "currency")):
-            # Try to find specific column
-            for col_name, counts in value_counts.items():
-                if isinstance(counts, dict) and not col_name.endswith("__note"):
-                    if col_name.lower() in q:
-                        result[f"distribution_{col_name}"] = counts
-            if not any(k.startswith("distribution_") for k in result):
-                result["all_distributions"] = value_counts
-
-        # Cross-tab summaries
         cross_tabs = precomputed.get("cross_tabs") or []
-        if any(kw in q for kw in ("cross", "by ", "group", "pivot", "breakdown")):
-            result["cross_tabs"] = cross_tabs
 
-        # If nothing matched, return everything
-        if not result:
-            result = {
-                "row_count": precomputed.get("row_count"),
-                "column_count": precomputed.get("column_count"),
-                "column_stats": col_stats,
-                "value_counts": value_counts,
-                "cross_tabs": cross_tabs,
-            }
+        result = {
+            "WARNING": "All numbers below are from a 500-row ingest sample. Use run_sql on the parquet path for accurate full-dataset results.",
+            "column_stats": col_stats,
+            "value_counts": value_counts,
+            "cross_tabs": cross_tabs,
+        }
 
         return json.dumps(result, default=str)
 

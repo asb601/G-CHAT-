@@ -20,7 +20,6 @@ from app.agent.llm import get_llm
 from app.agent.state import AgentState, MAX_TOOL_CALLS
 from app.agent.tools.catalog import build_catalog_tools
 from app.agent.tools.sql import build_sql_tools
-from app.agent.tools.analytics import build_analytics_tool
 from app.agent.tools.stats import build_stats_tool
 from app.agent.tools.sample import build_sample_tool
 from app.core.logger import chat_logger, llm_logger
@@ -39,27 +38,23 @@ _stores_lock = threading.Lock()
 SYSTEM_PROMPT_TEMPLATE = """You are a sharp, data-driven analyst with direct SQL access to structured data files.
 
 Container: {container_name}
-SQL file reference syntax:
-  CSV:     read_csv_auto('az://{container_name}/filename.csv')
-  Parquet: read_parquet('az://{container_name}/filename.parquet')
-  Get the actual filename from search_catalog first — never use 'blob_path' literally.
 {parquet_note}
 {sample_note}
 
---- TOOLS AVAILABLE ---
-- query_precomputed_analytics: instant pre-computed stats (totals, distributions, cross-tabs). Try this first.
-- query_sample_rows: instant access to ~500 ingested sample rows. No SQL needed for quick row browsing.
-- search_catalog: find files and their metadata.
-- get_file_schema: get exact column names and sample values.
-- run_aggregation / run_sql: run real SQL against the full dataset. Use parquet path when available.
-- summarise_dataframe: statistical breakdown of query results.
+--- TOOLS (use only what the question needs) ---
+1. run_sql: Execute DuckDB SQL on the full dataset. Parquet syntax: read_parquet('az://CONTAINER/file.parquet'). Always LIMIT results.
+2. run_aggregation: Quick GROUP BY helper — pass column names and an agg function, no SQL needed.
+3. search_catalog: Find which file(s) to query — returns descriptions, columns, date ranges. Use when the parquet path is not already provided above.
+4. get_file_schema: Get exact column names, types, and sample values for a file.
+5. inspect_data_format: Preview a few example rows to understand value formats (e.g. date format, region naming) before writing SQL. NOT for answering the user — always run SQL for real results.
+6. summarise_dataframe: Compute stats (mean, min, max, top values) on the last run_sql result in memory.
 
 --- HOW TO ANSWER ---
-Pick the right tool(s) based on what the question actually needs:
-- Pre-computed stats cover most aggregation and distribution questions instantly.
-- Sample rows are useful for "show me some data" or browsing the first few rows.
-- SQL is the right choice for anything that needs exact numbers, filtering, ordering, specific rows, or calculations on the full dataset — especially when parquet is available.
-- You can and should combine tools: e.g. run SQL for exact counts, then use precomputed cross-tabs for the breakdown.
+- If a parquet path is shown above, use it directly in run_sql — no need to call search_catalog first.
+- For any question needing real numbers, counts, filtering, ordering, or aggregation: use run_sql or run_aggregation on the full dataset.
+- Use inspect_data_format only to understand column formats before writing SQL — never as the answer itself.
+- Use get_file_schema if you need exact column names/types before writing SQL.
+- Use summarise_dataframe after SQL to add statistics to your answer.
 
 Always give a direct answer with the actual data. Lead with the key finding, then supporting numbers in bold.
 End with one notable trend or anomaly if visible in the data.
@@ -191,24 +186,15 @@ async def run_agent_query(query: str, db: AsyncSession) -> dict:
         row.file_id: row for row in all_analytics_rows
     }
 
-    # Build precomputed dict and collect ALL known parquet paths across every file
-    precomputed = None
-    parquet_blob_path = None  # used by SQL tools as default hint
+    # Collect parquet paths across all files
+    parquet_blob_path = None
     parquet_paths_all: dict[str, str] = {}  # blob_path → parquet_blob_path
 
     for meta in all_meta:
         analytics_row = analytics_by_file.get(meta.file_id)
         if not analytics_row:
             continue
-        if precomputed is None:
-            # Use first available analytics for the precomputed route
-            precomputed = {
-                "row_count": analytics_row.row_count,
-                "column_count": analytics_row.column_count,
-                "column_stats": analytics_row.column_stats,
-                "value_counts": analytics_row.value_counts,
-                "cross_tabs": analytics_row.cross_tabs,
-            }
+        if parquet_blob_path is None:
             parquet_blob_path = analytics_row.parquet_blob_path
         if analytics_row.parquet_blob_path and meta.blob_path:
             parquet_paths_all[meta.blob_path] = analytics_row.parquet_blob_path
@@ -224,10 +210,8 @@ async def run_agent_query(query: str, db: AsyncSession) -> dict:
         _request_stores[req_id] = store
 
     # ── Build tools for this request ──
-    # SQL tools listed first so the agent considers full-dataset queries before sample fallback
     all_tools = []
     all_tools.extend(build_sql_tools(connection_string, container_name, parquet_blob_path, store))
-    all_tools.extend(build_analytics_tool(precomputed))
     all_tools.extend(build_catalog_tools(catalog, relationships))
     all_tools.extend(build_stats_tool(store))
     all_tools.extend(build_sample_tool(sample_rows))
@@ -257,8 +241,8 @@ async def run_agent_query(query: str, db: AsyncSession) -> dict:
     sample_note = ""
     if sample_rows:
         sample_note = (
-            f"\nIngest-time sample: {len(sample_rows)} rows from the start of the file only."
-            " query_sample_rows() is instant but limited to these rows."
+            f"\nData format preview: {len(sample_rows)} example rows from ingest available via"
+            " inspect_data_format() — use to understand column formats before writing SQL."
         )
 
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
@@ -286,7 +270,6 @@ async def run_agent_query(query: str, db: AsyncSession) -> dict:
                      query=query[:200],
                      file_count=len(catalog),
                      container=container_name,
-                     has_precomputed=precomputed is not None,
                      has_parquet=parquet_blob_path is not None)
 
     try:

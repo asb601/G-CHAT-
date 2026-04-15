@@ -106,7 +106,7 @@ def build_sql_tools(
             state_store["sql_results"] = rows
             return json.dumps({"rows": rows, "row_count": len(rows), "sql_used": sql}, default=str)
         except asyncio.TimeoutError:
-            return json.dumps({"error": "Aggregation timed out after 120 seconds. Try query_precomputed_analytics for instant results instead."})
+            return json.dumps({"error": "Aggregation timed out after 120 seconds. Try a simpler GROUP BY or add filters to reduce data."})
         except Exception as exc:
             return json.dumps({"error": str(exc)[:400], "sql_attempted": sql})
 
