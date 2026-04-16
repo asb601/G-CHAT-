@@ -117,12 +117,15 @@ async def sample_file(
 
 
 async def execute_query(
-    sql: str, connection_string: str, timeout_seconds: int = 30
-) -> list[dict]:
-    def _run() -> list[dict]:
+    sql: str, connection_string: str, timeout_seconds: int = 30,
+    max_rows: int = 1000,
+) -> tuple[list[dict], int]:
+    """Execute SQL and return (rows, total_row_count). Rows capped at max_rows."""
+    def _run() -> tuple[list[dict], int]:
         try:
             conn = _get_connection(connection_string)
             result = conn.execute(sql).df()
+            total = len(result)
 
             def _json_safe(rows: list[dict]) -> list[dict]:
                 safe = []
@@ -134,7 +137,7 @@ async def execute_query(
                     })
                 return safe
 
-            return _json_safe(result.head(1000).fillna("").to_dict("records"))
+            return _json_safe(result.head(max_rows).fillna("").to_dict("records")), total
         except Exception:
             _clear_connection(connection_string)
             raise
@@ -142,12 +145,13 @@ async def execute_query(
     start = time.perf_counter()
     chat_logger.info("duckdb", operation="execute_query", status="started",
                      sql_preview=sql[:300])
-    result = await asyncio.wait_for(
+    rows, total = await asyncio.wait_for(
         asyncio.to_thread(_run), timeout=timeout_seconds
     )
     chat_logger.info("duckdb", operation="execute_query", status="done",
-                     row_count=len(result), duration_ms=_ms(start))
-    return result
+                     row_count=len(rows), total_rows=total,
+                     truncated=total > max_rows, duration_ms=_ms(start))
+    return rows, total
 
 
 def _resolve_data_path(

@@ -50,3 +50,4 @@ server/uploads/
 # Test data (large files)
 server/testing/*.csv
 server/testing/*.parquet
+VM_SETUP.md

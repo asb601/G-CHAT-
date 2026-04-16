@@ -35,30 +35,25 @@ _stores_lock = threading.Lock()
 
 # ── System prompt ─────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT_TEMPLATE = """You are a sharp, data-driven analyst with direct SQL access to structured data files.
+SYSTEM_PROMPT_TEMPLATE = """You are a sharp, data-driven analyst with direct SQL access to structured data files stored in Azure Blob Storage.
 
 Container: {container_name}
 {parquet_note}
 {sample_note}
 
---- TOOLS (use only what the question needs) ---
-1. run_sql: Execute DuckDB SQL on the full dataset. Parquet syntax: read_parquet('az://CONTAINER/file.parquet'). Always LIMIT results.
-2. run_aggregation: Quick GROUP BY helper — pass column names and an agg function, no SQL needed.
-3. search_catalog: Find which file(s) to query — returns descriptions, columns, date ranges. Use when the parquet path is not already provided above.
-4. get_file_schema: Get exact column names, types, and sample values for a file.
-5. inspect_data_format: Preview a few example rows to understand value formats (e.g. date format, region naming) before writing SQL. NOT for answering the user — always run SQL for real results.
-6. summarise_dataframe: Compute stats (mean, min, max, top values) on the last run_sql result in memory.
+--- TOOLS ---
+1. run_sql: Execute any DuckDB SQL. File paths and column names are listed above.
+2. search_catalog: Find which file(s) to query when the paths above don't cover the question.
+3. get_file_schema: Get full column names, types, and sample values for a specific file.
+4. inspect_data_format: Preview a few rows to check value formats (e.g. date format, casing) before writing SQL. Not for answering — use run_sql.
+5. summarise_dataframe: Compute stats on the last run_sql result in memory.
 
---- HOW TO ANSWER ---
-- If a parquet path is shown above, use it directly in run_sql — no need to call search_catalog first.
-- For any question needing real numbers, counts, filtering, ordering, or aggregation: use run_sql or run_aggregation on the full dataset.
-- Use inspect_data_format only to understand column formats before writing SQL — never as the answer itself.
-- Use get_file_schema if you need exact column names/types before writing SQL.
-- Use summarise_dataframe after SQL to add statistics to your answer.
-
-Always give a direct answer with the actual data. Lead with the key finding, then supporting numbers in bold.
-End with one notable trend or anomaly if visible in the data.
-Max {max_calls} tool calls — be efficient.
+--- RULES ---
+- If file paths and columns are listed above, use them directly in run_sql. No need for search_catalog or get_file_schema.
+- Write complete SQL with proper column names from above. Do not guess column names.
+- For multi-file questions, use JOINs or multiple run_sql calls.
+- Give a direct answer with actual data. Bold the key numbers.
+- Max {max_calls} tool calls.
 """
 
 
@@ -220,22 +215,40 @@ async def run_agent_query(query: str, db: AsyncSession) -> dict:
     graph = _build_graph(all_tools)
 
     # ── System prompt ──
+    # Build a blob_path → column-names lookup so each file's columns are shown
+    columns_by_blob: dict[str, list[str]] = {}
+    for entry in catalog:
+        cols = [c["name"] for c in (entry.get("columns_info") or [])]
+        if cols and entry.get("blob_path"):
+            columns_by_blob[entry["blob_path"]] = cols
+
     parquet_note = ""
     if parquet_paths_all:
-        lines = [
-            f"  ready-to-use: read_parquet('az://{container_name}/{pq}')"
-            for pq in parquet_paths_all.values()
-        ]
+        lines = []
+        for blob, pq in parquet_paths_all.items():
+            line = f"  read_parquet('az://{container_name}/{pq}')"
+            cols = columns_by_blob.get(blob)
+            if cols:
+                line += f"\n    Columns: {', '.join(cols)}"
+            desc = next((e.get("ai_description") for e in catalog if e.get("blob_path") == blob), None)
+            if desc:
+                line += f"\n    Description: {desc}"
+            lines.append(line)
         parquet_note = (
-            "Parquet paths (use these directly in run_sql — no search_catalog needed):\n"
+            "Available parquet files (use directly in run_sql — no search_catalog needed):\n"
             + "\n".join(lines)
             + "\nParquet covers the FULL dataset. Use it for any ordering, filtering, counting, or row retrieval."
         )
     elif parquet_blob_path:
+        cols_line = ""
+        first_cols = columns_by_blob.get(first_meta.blob_path)
+        if first_cols:
+            cols_line = f"\n    Columns: {', '.join(first_cols)}"
         parquet_note = (
             f"Parquet path (use directly in run_sql — no search_catalog needed):\n"
-            f"  ready-to-use: read_parquet('az://{container_name}/{parquet_blob_path}')\n"
-            "Parquet covers the FULL dataset. Use it for any ordering, filtering, counting, or row retrieval."
+            f"  read_parquet('az://{container_name}/{parquet_blob_path}')"
+            + cols_line
+            + "\nParquet covers the FULL dataset. Use it for any ordering, filtering, counting, or row retrieval."
         )
 
     sample_note = ""
