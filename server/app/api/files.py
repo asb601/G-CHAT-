@@ -16,8 +16,6 @@ from app.core.logger import upload_logger, blob_logger, db_logger, ingest_logger
 from app.core.security import get_current_user, require_admin
 from app.services.ingestion_service import ingest_file
 from app.models.background_job import BackgroundJob
-from app.models.background_job import BackgroundJob
-from app.models.background_job import BackgroundJob
 from app.models.container import ContainerConfig
 from app.models.file import File
 from app.models.folder import Folder
@@ -105,7 +103,7 @@ async def get_upload_url(
 
     file_id = str(uuid.uuid4())
     safe_filename = body.filename.replace(" ", "_")
-    blob_name = f"{file_id}_{safe_filename}"
+    blob_name = f"{file_id[:8]}_{safe_filename}"
 
     sas_token = generate_blob_sas(
         account_name=account_name,
@@ -291,45 +289,40 @@ async def delete_file(
     if not file:
         raise HTTPException(status_code=404, detail="File not found")
 
-    # Remove from Azure Blob Storage using container config
+    # Remove original + parquet blobs from Azure Blob Storage
     blob_name = file.blob_path or file.id
+    parquet_blob_name = blob_name.rsplit(".", 1)[0] + ".parquet"
+
     if file.container_id:
         try:
             config = await db.get(ContainerConfig, file.container_id)
             if config:
                 blob_start = time.perf_counter()
-                blob_logger.info("blob_delete_started", blob_name=blob_name)
                 blob_service = await asyncio.to_thread(
                     BlobServiceClient.from_connection_string, config.connection_string
                 )
                 container_client = await asyncio.to_thread(
                     blob_service.get_container_client, config.container_name
                 )
+
+                # Delete original blob
+                blob_logger.info("blob_delete_started", blob_name=blob_name)
                 await asyncio.to_thread(container_client.delete_blob, blob_name)
                 blob_logger.info("blob_delete_complete", blob_name=blob_name, duration_ms=round((time.perf_counter() - blob_start) * 1000, 2))
+
+                # Delete parquet blob (if exists)
+                try:
+                    blob_logger.info("blob_delete_started", blob_name=parquet_blob_name)
+                    await asyncio.to_thread(container_client.delete_blob, parquet_blob_name)
+                    blob_logger.info("blob_delete_complete", blob_name=parquet_blob_name)
+                except Exception:
+                    blob_logger.info("blob_delete_skipped", blob_name=parquet_blob_name, reason="not_found_or_error")
         except Exception as exc:
             blob_logger.warning("blob_delete_failed", blob_name=blob_name, error=str(exc))
 
-    db_start = time.perf_counter()
-    db_logger.info("query_started", query="delete_file", file_id=file_id)
-    await db.delete(file)
-    await db.commit()
-    db_logger.info("query_complete", query="delete_file", duration_ms=round((time.perf_counter() - db_start) * 1000, 2))
-
-    upload_logger.info("delete_complete", file_id=file_id, duration_ms=round((time.perf_counter() - start) * 1000, 2))
-    if not file:
-        raise HTTPException(status_code=404, detail="File not found")
-
-    # Remove from Azure Blob Storage
-    blob_name = file.blob_path or file.id
-    try:
-        blob_start = time.perf_counter()
-        blob_logger.info("blob_delete_started", blob_name=blob_name)
-        container = _blob_container()
-        await asyncio.to_thread(container.delete_blob, blob_name)
-        blob_logger.info("blob_delete_complete", blob_name=blob_name, duration_ms=round((time.perf_counter() - blob_start) * 1000, 2))
-    except Exception as exc:
-        blob_logger.warning("blob_delete_failed", blob_name=blob_name, error=str(exc))
+    # Delete background jobs for this file
+    from sqlalchemy import delete as sql_delete
+    await db.execute(sql_delete(BackgroundJob).where(BackgroundJob.file_id == file_id))
 
     db_start = time.perf_counter()
     db_logger.info("query_started", query="delete_file", file_id=file_id)

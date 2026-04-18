@@ -231,11 +231,10 @@ interface FileTiming {
   upload_secs: number | null;
   ingested_at: string | null;
   ingestion_secs: number | null;
-  total_secs: number | null;
   parquet_status: string | null;
-  parquet_started_at: string | null;
-  parquet_completed_at: string | null;
   parquet_secs: number | null;
+  processing_secs: number | null;
+  total_secs: number | null;
   parquet_error: string | null;
 }
 
@@ -342,10 +341,8 @@ function PerformancePanel() {
               <th className="px-3 py-2 font-medium">Uploaded</th>
               <th className="px-3 py-2 font-medium text-center">Upload Time</th>
               <th className="px-3 py-2 font-medium">Status</th>
-              <th className="px-3 py-2 font-medium text-center">Ingestion Time</th>
+              <th className="px-3 py-2 font-medium text-center">Processing Time</th>
               <th className="px-3 py-2 font-medium text-center">Total Time</th>
-              <th className="px-3 py-2 font-medium">Parquet</th>
-              <th className="px-3 py-2 font-medium text-center">Parquet Time</th>
             </tr>
           </thead>
           <tbody>
@@ -372,13 +369,23 @@ function PerformancePanel() {
                 </td>
                 <td className="px-3 py-2">
                   <StatusBadge status={t.ingest_status} />
+                  {t.parquet_status && t.parquet_status !== t.ingest_status && (
+                    <span className="ml-1"><StatusBadge status={t.parquet_status} /></span>
+                  )}
                 </td>
                 <td className="px-3 py-2 text-center">
-                  {t.ingestion_secs !== null ? (
+                  {t.processing_secs !== null ? (
                     <span className="flex items-center justify-center gap-1 text-foreground font-mono">
                       <Zap className="w-3 h-3 text-yellow-400" />
-                      {formatSecs(t.ingestion_secs)}
+                      {formatSecs(t.processing_secs)}
+                      {t.ingestion_secs !== null && t.parquet_secs !== null && (
+                        <span className="text-[9px] text-muted-foreground ml-0.5">
+                          ({formatSecs(t.ingestion_secs)} + {formatSecs(t.parquet_secs)})
+                        </span>
+                      )}
                     </span>
+                  ) : t.parquet_error ? (
+                    <span className="text-red-400 text-[10px]" title={t.parquet_error}>Error</span>
                   ) : (
                     <span className="text-muted-foreground">—</span>
                   )}
@@ -393,30 +400,11 @@ function PerformancePanel() {
                     <span className="text-muted-foreground">—</span>
                   )}
                 </td>
-                <td className="px-3 py-2">
-                  {t.parquet_status ? (
-                    <StatusBadge status={t.parquet_status} />
-                  ) : (
-                    <span className="text-muted-foreground text-[10px]">—</span>
-                  )}
-                </td>
-                <td className="px-3 py-2 text-center">
-                  {t.parquet_secs !== null ? (
-                    <span className="flex items-center justify-center gap-1 text-foreground font-mono">
-                      <Clock className="w-3 h-3 text-muted-foreground" />
-                      {formatSecs(t.parquet_secs)}
-                    </span>
-                  ) : t.parquet_error ? (
-                    <span className="text-red-400 text-[10px] truncate max-w-[120px]" title={t.parquet_error}>Error</span>
-                  ) : (
-                    <span className="text-muted-foreground">—</span>
-                  )}
-                </td>
               </tr>
             ))}
             {timings.length === 0 && !loading && (
               <tr>
-                <td colSpan={9} className="px-4 py-8 text-center text-muted-foreground">
+                <td colSpan={7} className="px-4 py-8 text-center text-muted-foreground">
                   No files found
                 </td>
               </tr>

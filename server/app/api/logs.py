@@ -107,10 +107,17 @@ async def file_timings(
         if job and job.completed_at and job.started_at:
             parquet_secs = round((job.completed_at - job.started_at).total_seconds(), 1)
 
-        # Total = upload + ingestion (if both available)
+        # Processing = ingestion + parquet (complete server-side time)
+        processing_secs = None
+        if ingestion_secs is not None:
+            processing_secs = ingestion_secs
+            if parquet_secs is not None:
+                processing_secs = round(processing_secs + parquet_secs, 1)
+
+        # Total = upload + processing (end-to-end)
         total_secs = None
-        if upload_secs is not None and ingestion_secs is not None:
-            total_secs = round(upload_secs + ingestion_secs, 1)
+        if upload_secs is not None and processing_secs is not None:
+            total_secs = round(upload_secs + processing_secs, 1)
 
         rows.append({
             "file_id": f.id,
@@ -121,11 +128,10 @@ async def file_timings(
             "upload_secs": upload_secs,
             "ingested_at": meta.ingested_at.isoformat() if meta and meta.ingested_at else None,
             "ingestion_secs": ingestion_secs,
-            "total_secs": total_secs,
             "parquet_status": job.status if job else None,
-            "parquet_started_at": job.started_at.isoformat() if job and job.started_at else None,
-            "parquet_completed_at": job.completed_at.isoformat() if job and job.completed_at else None,
             "parquet_secs": parquet_secs,
+            "processing_secs": processing_secs,
+            "total_secs": total_secs,
             "parquet_error": job.error_message if job else None,
         })
 
