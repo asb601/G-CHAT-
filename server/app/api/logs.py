@@ -63,6 +63,66 @@ async def list_log_files(_: User = Depends(_require_admin)) -> dict:
     return {"log_dir": str(LOG_DIR), "files": files}
 
 
+@router.get("/file-timings")
+async def file_timings(
+    _: User = Depends(_require_admin),
+    db: AsyncSession = Depends(get_db),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> dict:
+    """Return upload, ingestion, and parquet conversion timing per file (most recent first)."""
+    files_result = await db.execute(
+        select(File).order_by(File.created_at.desc()).limit(limit)
+    )
+    files = files_result.scalars().all()
+    if not files:
+        return {"files": []}
+
+    file_ids = [f.id for f in files]
+
+    meta_result = await db.execute(
+        select(FileMetadata).where(FileMetadata.file_id.in_(file_ids))
+    )
+    meta_map = {m.file_id: m for m in meta_result.scalars().all()}
+
+    jobs_result = await db.execute(
+        select(BackgroundJob).where(
+            BackgroundJob.file_id.in_(file_ids),
+            BackgroundJob.job_type == "parquet_conversion",
+        )
+    )
+    jobs_map = {j.file_id: j for j in jobs_result.scalars().all()}
+
+    rows = []
+    for f in files:
+        meta = meta_map.get(f.id)
+        job = jobs_map.get(f.id)
+
+        ingestion_secs = None
+        if meta and meta.ingested_at and f.created_at:
+            ingestion_secs = round((meta.ingested_at - f.created_at).total_seconds(), 1)
+
+        parquet_secs = None
+        if job and job.completed_at and job.started_at:
+            parquet_secs = round((job.completed_at - job.started_at).total_seconds(), 1)
+
+        rows.append({
+            "file_id": f.id,
+            "name": f.name,
+            "size": f.size,
+            "ingest_status": f.ingest_status,
+            "uploaded_at": f.created_at.isoformat() if f.created_at else None,
+            "ingested_at": meta.ingested_at.isoformat() if meta and meta.ingested_at else None,
+            "ingestion_secs": ingestion_secs,
+            "parquet_status": job.status if job else None,
+            "parquet_started_at": job.started_at.isoformat() if job and job.started_at else None,
+            "parquet_completed_at": job.completed_at.isoformat() if job and job.completed_at else None,
+            "parquet_secs": parquet_secs,
+            "parquet_error": job.error_message if job else None,
+        })
+
+    return {"files": rows}
+
+
 @router.get("/{filename}")
 async def tail_log(
     filename: str,
@@ -108,68 +168,3 @@ async def search_log(
                 break
 
     return {"file": filename, "query": q, "matches": len(matches), "lines": matches}
-
-
-@router.get("/file-timings")
-async def file_timings(
-    _: User = Depends(_require_admin),
-    db: AsyncSession = Depends(get_db),
-    limit: int = Query(default=50, ge=1, le=200),
-) -> dict:
-    """Return upload, ingestion, and parquet conversion timing per file (most recent first)."""
-    # Fetch recent files
-    files_result = await db.execute(
-        select(File).order_by(File.created_at.desc()).limit(limit)
-    )
-    files = files_result.scalars().all()
-    if not files:
-        return {"files": []}
-
-    file_ids = [f.id for f in files]
-
-    # Fetch metadata (ingested_at)
-    meta_result = await db.execute(
-        select(FileMetadata).where(FileMetadata.file_id.in_(file_ids))
-    )
-    meta_map = {m.file_id: m for m in meta_result.scalars().all()}
-
-    # Fetch background jobs (parquet conversion)
-    jobs_result = await db.execute(
-        select(BackgroundJob).where(
-            BackgroundJob.file_id.in_(file_ids),
-            BackgroundJob.job_type == "parquet_conversion",
-        )
-    )
-    jobs_map = {j.file_id: j for j in jobs_result.scalars().all()}
-
-    rows = []
-    for f in files:
-        meta = meta_map.get(f.id)
-        job = jobs_map.get(f.id)
-
-        # Ingestion duration = metadata.ingested_at - file.created_at
-        ingestion_secs = None
-        if meta and meta.ingested_at and f.created_at:
-            ingestion_secs = round((meta.ingested_at - f.created_at).total_seconds(), 1)
-
-        # Parquet duration = job.completed_at - job.started_at
-        parquet_secs = None
-        if job and job.completed_at and job.started_at:
-            parquet_secs = round((job.completed_at - job.started_at).total_seconds(), 1)
-
-        rows.append({
-            "file_id": f.id,
-            "name": f.name,
-            "size": f.size,
-            "ingest_status": f.ingest_status,
-            "uploaded_at": f.created_at.isoformat() if f.created_at else None,
-            "ingested_at": meta.ingested_at.isoformat() if meta and meta.ingested_at else None,
-            "ingestion_secs": ingestion_secs,
-            "parquet_status": job.status if job else None,
-            "parquet_started_at": job.started_at.isoformat() if job and job.started_at else None,
-            "parquet_completed_at": job.completed_at.isoformat() if job and job.completed_at else None,
-            "parquet_secs": parquet_secs,
-            "parquet_error": job.error_message if job else None,
-        })
-
-    return {"files": rows}
