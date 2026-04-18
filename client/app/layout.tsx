@@ -9,6 +9,7 @@ const inter = Inter({
 
 export const metadata: Metadata = {
   title: "Gen-Chatbot",
+  
   description: "AI Document Intelligence",
 };
 
