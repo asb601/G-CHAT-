@@ -10,7 +10,7 @@ import FileManagerView, {
 } from "@/components/file-manager/FileManagerView";
 import { apiFetch } from "@/lib/auth";
 import { useAuth } from "@/components/auth-provider";
-import { uploadFileDirect, type UploadProgress } from "@/lib/upload";
+import { uploadFileQueue, UploadController, type UploadProgress } from "@/lib/upload";
 
 /* ── types for container picker ──────────────────────────────────────────── */
 
@@ -127,40 +127,50 @@ export default function FoldersPage() {
   }, []);
 
   const [uploadProgress, setUploadProgress] = useState<UploadProgressItem[]>([]);
+  const [uploadCtrl, setUploadCtrl] = useState<UploadController | null>(null);
 
   const handleUpload = useCallback(
     async (files: File[]) => {
       if (!selectedContainerId) return;
 
-      // Init progress state
+      const ctrl = new UploadController();
+      setUploadCtrl(ctrl);
+
+      // Init progress state — all queued
       setUploadProgress(
-        files.map((f) => ({ fileName: f.name, percent: 0, speedMBps: 0, remainingMins: 0, phase: "uploading" as const }))
+        files.map((f) => ({ fileName: f.name, percent: 0, speedMBps: 0, remainingSecs: 0, phase: "queued" as const }))
       );
 
       const onProgress = (p: UploadProgress) => {
         setUploadProgress((prev) =>
           prev.map((item, i) =>
             i === p.fileIndex
-              ? { fileName: p.fileName, percent: p.percent, speedMBps: p.speedMBps, remainingMins: p.remainingMins, phase: p.phase }
+              ? { fileName: p.fileName, percent: p.percent, speedMBps: p.speedMBps, remainingSecs: p.remainingSecs, phase: p.phase }
               : item
           )
         );
       };
 
-      // Upload all files concurrently
-      await Promise.allSettled(
-        files.map((file, i) =>
-          uploadFileDirect(file, i, currentFolderId, onProgress, selectedContainerId)
-        )
-      );
+      // Queue-based upload: 2 files at a time
+      await uploadFileQueue(files, currentFolderId, selectedContainerId, onProgress, ctrl, 2);
 
       await mutate();
+      ctrl.cleanup();
+      setUploadCtrl(null);
 
       // Clear progress after a short delay
-      setTimeout(() => setUploadProgress([]), 2000);
+      setTimeout(() => setUploadProgress([]), 3000);
     },
     [currentFolderId, mutate, selectedContainerId]
   );
+
+  const handleCancelUpload = useCallback((fileIndex: number) => {
+    uploadCtrl?.cancel(fileIndex);
+  }, [uploadCtrl]);
+
+  const handleCancelAll = useCallback(() => {
+    uploadCtrl?.cancelAll();
+  }, [uploadCtrl]);
 
   const handleDelete = useCallback(
     async (id: string) => {
@@ -276,6 +286,8 @@ export default function FoldersPage() {
       onOpenFile={handleOpenFile}
       onFolderHover={handleFolderHover}
       onBack={folderStack.length > 0 ? handleBack : undefined}
+      onCancelUpload={handleCancelUpload}
+      onCancelAllUploads={handleCancelAll}
     />
   );
 }

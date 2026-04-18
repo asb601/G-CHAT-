@@ -10,6 +10,11 @@ import {
   AlertTriangle,
   ChevronDown,
   Clock,
+  Upload,
+  Zap,
+  CheckCircle,
+  XCircle,
+  Loader2,
 } from "lucide-react";
 import { apiFetch } from "@/lib/auth";
 import { useAuth } from "@/components/auth-provider";
@@ -215,6 +220,190 @@ function LogLine({ entry }: { entry: LogEntry }) {
 
 /* ── main page ───────────────────────────────────────────────────────────── */
 
+type PageView = "logs" | "performance";
+
+interface FileTiming {
+  file_id: string;
+  name: string;
+  size: number;
+  ingest_status: string;
+  uploaded_at: string | null;
+  ingested_at: string | null;
+  ingestion_secs: number | null;
+  parquet_status: string | null;
+  parquet_started_at: string | null;
+  parquet_completed_at: string | null;
+  parquet_secs: number | null;
+  parquet_error: string | null;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function formatSecs(secs: number | null): string {
+  if (secs === null || secs === undefined) return "—";
+  if (secs < 1) return `${Math.round(secs * 1000)}ms`;
+  if (secs < 60) return `${secs.toFixed(1)}s`;
+  const m = Math.floor(secs / 60);
+  const s = Math.round(secs % 60);
+  return s > 0 ? `${m}m ${s}s` : `${m}m`;
+}
+
+function formatDateTime(iso: string | null): string {
+  if (!iso) return "—";
+  try {
+    return new Date(iso).toLocaleString("en-US", {
+      month: "short", day: "numeric",
+      hour: "2-digit", minute: "2-digit", second: "2-digit",
+      hour12: false,
+    });
+  } catch {
+    return iso;
+  }
+}
+
+function StatusBadge({ status }: { status: string }) {
+  const map: Record<string, { color: string; icon: typeof CheckCircle }> = {
+    ingested: { color: "bg-green-500/10 text-green-400 border-green-500/20", icon: CheckCircle },
+    done: { color: "bg-green-500/10 text-green-400 border-green-500/20", icon: CheckCircle },
+    failed: { color: "bg-red-500/10 text-red-400 border-red-500/20", icon: XCircle },
+    running: { color: "bg-blue-500/10 text-blue-400 border-blue-500/20", icon: Loader2 },
+    pending: { color: "bg-yellow-500/10 text-yellow-400 border-yellow-500/20", icon: Clock },
+    not_ingested: { color: "bg-zinc-500/10 text-zinc-400 border-zinc-500/20", icon: Clock },
+  };
+  const conf = map[status] || map.not_ingested;
+  const Icon = conf.icon;
+  return (
+    <span className={cn("inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium border", conf.color)}>
+      <Icon className={cn("w-3 h-3", status === "running" && "animate-spin")} />
+      {status}
+    </span>
+  );
+}
+
+function PerformancePanel() {
+  const [timings, setTimings] = useState<FileTiming[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchTimings = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await apiFetch("/api/logs/file-timings?limit=50");
+      if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
+      const data = await res.json();
+      setTimings(data.files);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Failed to fetch timings");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { fetchTimings(); }, [fetchTimings]);
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* Toolbar */}
+      <div className="border-b border-border px-4 py-2 flex items-center gap-2 shrink-0">
+        <span className="text-xs text-muted-foreground">
+          {timings.length} file{timings.length !== 1 && "s"} — most recent first
+        </span>
+        <button
+          onClick={fetchTimings}
+          disabled={loading}
+          className="ml-auto p-1.5 rounded bg-surface-raised text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+        >
+          <RefreshCw className={cn("w-3.5 h-3.5", loading && "animate-spin")} />
+        </button>
+      </div>
+
+      {error && (
+        <div className="mx-4 mt-2 px-3 py-2 rounded bg-red-500/10 border border-red-500/20 text-red-400 text-xs flex items-center gap-2">
+          <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+          {error}
+        </div>
+      )}
+
+      {/* Table */}
+      <div className="flex-1 overflow-auto">
+        <table className="w-full text-xs">
+          <thead className="sticky top-0 bg-surface z-10">
+            <tr className="border-b border-border text-left text-muted-foreground">
+              <th className="px-4 py-2 font-medium">File</th>
+              <th className="px-3 py-2 font-medium">Size</th>
+              <th className="px-3 py-2 font-medium">Uploaded</th>
+              <th className="px-3 py-2 font-medium">Ingestion</th>
+              <th className="px-3 py-2 font-medium text-center">Ingestion Time</th>
+              <th className="px-3 py-2 font-medium">Parquet</th>
+              <th className="px-3 py-2 font-medium text-center">Parquet Time</th>
+            </tr>
+          </thead>
+          <tbody>
+            {timings.map((t) => (
+              <tr key={t.file_id} className="border-b border-border/50 hover:bg-surface-raised/50 transition-colors">
+                <td className="px-4 py-2 text-foreground font-medium truncate max-w-[200px]" title={t.name}>
+                  {t.name}
+                </td>
+                <td className="px-3 py-2 text-muted-foreground whitespace-nowrap">
+                  {formatBytes(t.size)}
+                </td>
+                <td className="px-3 py-2 text-muted-foreground whitespace-nowrap">
+                  {formatDateTime(t.uploaded_at)}
+                </td>
+                <td className="px-3 py-2">
+                  <StatusBadge status={t.ingest_status} />
+                </td>
+                <td className="px-3 py-2 text-center">
+                  {t.ingestion_secs !== null ? (
+                    <span className="flex items-center justify-center gap-1 text-foreground font-mono">
+                      <Clock className="w-3 h-3 text-muted-foreground" />
+                      {formatSecs(t.ingestion_secs)}
+                    </span>
+                  ) : (
+                    <span className="text-muted-foreground">—</span>
+                  )}
+                </td>
+                <td className="px-3 py-2">
+                  {t.parquet_status ? (
+                    <StatusBadge status={t.parquet_status} />
+                  ) : (
+                    <span className="text-muted-foreground text-[10px]">—</span>
+                  )}
+                </td>
+                <td className="px-3 py-2 text-center">
+                  {t.parquet_secs !== null ? (
+                    <span className="flex items-center justify-center gap-1 text-foreground font-mono">
+                      <Clock className="w-3 h-3 text-muted-foreground" />
+                      {formatSecs(t.parquet_secs)}
+                    </span>
+                  ) : t.parquet_error ? (
+                    <span className="text-red-400 text-[10px] truncate max-w-[120px]" title={t.parquet_error}>Error</span>
+                  ) : (
+                    <span className="text-muted-foreground">—</span>
+                  )}
+                </td>
+              </tr>
+            ))}
+            {timings.length === 0 && !loading && (
+              <tr>
+                <td colSpan={7} className="px-4 py-8 text-center text-muted-foreground">
+                  No files found
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 const LOG_FILES = [
   { name: "ai_pipeline.log", label: "AI Pipeline", description: "Ingestion & chat" },
   { name: "system.log", label: "System", description: "Upload, auth, blob" },
@@ -224,6 +413,7 @@ const LOG_FILES = [
 
 export default function AdminLogsPage() {
   const { user } = useAuth();
+  const [pageView, setPageView] = useState<PageView>("logs");
   const [activeFile, setActiveFile] = useState("ai_pipeline.log");
   const [lines, setLines] = useState<LogEntry[]>([]);
   const [totalLines, setTotalLines] = useState(0);
@@ -293,12 +483,45 @@ export default function AdminLogsPage() {
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="border-b border-border px-4 py-3 shrink-0">
-        <h1 className="text-lg font-semibold text-foreground">Server Logs</h1>
-        <p className="text-xs text-muted-foreground mt-0.5">
-          Real-time server logs — ingestion pipeline, LLM calls, system events
-        </p>
+      <div className="border-b border-border px-4 py-3 shrink-0 flex items-center justify-between">
+        <div>
+          <h1 className="text-lg font-semibold text-foreground">Server Logs</h1>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            Real-time server logs — ingestion pipeline, LLM calls, system events
+          </p>
+        </div>
+        <div className="flex gap-1">
+          <button
+            onClick={() => setPageView("logs")}
+            className={cn(
+              "px-3 py-1.5 rounded text-xs font-medium transition-colors",
+              pageView === "logs"
+                ? "bg-primary text-primary-foreground"
+                : "bg-surface-raised text-muted-foreground hover:text-foreground"
+            )}
+          >
+            <FileText className="w-3.5 h-3.5 inline mr-1" />
+            Logs
+          </button>
+          <button
+            onClick={() => setPageView("performance")}
+            className={cn(
+              "px-3 py-1.5 rounded text-xs font-medium transition-colors",
+              pageView === "performance"
+                ? "bg-primary text-primary-foreground"
+                : "bg-surface-raised text-muted-foreground hover:text-foreground"
+            )}
+          >
+            <Zap className="w-3.5 h-3.5 inline mr-1" />
+            Performance
+          </button>
+        </div>
       </div>
+
+      {pageView === "performance" ? (
+        <PerformancePanel />
+      ) : (
+      <>
 
       {/* Toolbar */}
       <div className="border-b border-border px-4 py-2 flex flex-wrap items-center gap-2 shrink-0">
@@ -403,6 +626,8 @@ export default function AdminLogsPage() {
           <LogLine key={i} entry={entry} />
         ))}
       </div>
+      </>
+      )}
     </div>
   );
 }

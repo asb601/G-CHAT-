@@ -26,8 +26,10 @@ import {
   Zap,
   Check,
   X,
+  XCircle,
   Cloud,
   ExternalLink,
+  Clock,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -50,8 +52,8 @@ export interface UploadProgressItem {
   fileName: string;
   percent: number;
   speedMBps: number;
-  remainingMins: number;
-  phase: "compressing" | "uploading" | "confirming" | "done" | "error";
+  remainingSecs: number;
+  phase: "queued" | "uploading" | "confirming" | "done" | "paused" | "cancelled" | "error";
 }
 
 interface ContainerOption {
@@ -77,6 +79,8 @@ interface FileManagerViewProps {
   onOpenFile?: (id: string) => void;
   onFolderHover?: (id: string) => void;
   onBack?: () => void;
+  onCancelUpload?: (fileIndex: number) => void;
+  onCancelAllUploads?: () => void;
 }
 
 type ViewMode = "grid" | "list";
@@ -89,6 +93,13 @@ function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatTime(secs: number): string {
+  if (secs < 60) return `${secs}s`;
+  const m = Math.floor(secs / 60);
+  const s = secs % 60;
+  return s > 0 ? `${m}m ${s}s` : `${m}m`;
 }
 
 function formatDate(d: Date): string {
@@ -375,6 +386,8 @@ export default function FileManagerView({
   onOpenFile,
   onFolderHover,
   onBack,
+  onCancelUpload,
+  onCancelAllUploads,
 }: FileManagerViewProps) {
   const items = files ?? [];
   const [view, setView] = useState<ViewMode>("grid");
@@ -767,10 +780,22 @@ export default function FileManagerView({
       {/* ── Upload progress panel ── */}
       {uploadProgress && uploadProgress.length > 0 && (
         <div className="shrink-0 border-t border-border bg-surface/80 backdrop-blur">
-          <div className="px-4 py-2 text-[11px] text-muted-foreground uppercase tracking-wide">
-            Uploading {uploadProgress.filter((p) => p.phase !== "done" && p.phase !== "error").length} of {uploadProgress.length} files
+          <div className="px-4 py-2 flex items-center justify-between">
+            <span className="text-[11px] text-muted-foreground uppercase tracking-wide">
+              Uploading {uploadProgress.filter((p) => p.phase === "uploading" || p.phase === "confirming").length} of {uploadProgress.length} files
+              {uploadProgress.filter((p) => p.phase === "queued").length > 0 &&
+                ` · ${uploadProgress.filter((p) => p.phase === "queued").length} queued`}
+            </span>
+            {onCancelAllUploads && uploadProgress.some((p) => p.phase === "uploading" || p.phase === "queued") && (
+              <button
+                onClick={onCancelAllUploads}
+                className="text-[11px] text-red-400 hover:text-red-300 transition-colors"
+              >
+                Cancel All
+              </button>
+            )}
           </div>
-          <div className="max-h-32 overflow-y-auto px-4 pb-2 space-y-1.5">
+          <div className="max-h-40 overflow-y-auto px-4 pb-2 space-y-1.5">
             {uploadProgress.map((p, i) => (
               <div key={i} className="flex items-center gap-3">
                 <span className="text-xs text-foreground truncate flex-1 min-w-0">{p.fileName}</span>
@@ -778,22 +803,40 @@ export default function FileManagerView({
                   <div
                     className={cn(
                       "h-full rounded-full transition-all duration-300",
-                      p.phase === "error" ? "bg-red-500" : p.phase === "done" ? "bg-green-500" : "bg-primary"
+                      p.phase === "error" ? "bg-red-500"
+                        : p.phase === "done" ? "bg-green-500"
+                          : p.phase === "cancelled" ? "bg-zinc-500"
+                            : p.phase === "paused" ? "bg-yellow-500"
+                              : p.phase === "queued" ? "bg-zinc-600"
+                                : "bg-primary"
                     )}
-                    style={{ width: `${p.percent}%` }}
+                    style={{ width: `${p.phase === "queued" ? 0 : p.percent}%` }}
                   />
                 </div>
-                <span className="text-[11px] text-muted-foreground text-right shrink-0 whitespace-nowrap">
+                <span className="text-[11px] text-muted-foreground text-right shrink-0 whitespace-nowrap w-28">
                   {p.phase === "error"
                     ? "Error"
                     : p.phase === "done"
                       ? <Check className="w-3 h-3 text-green-500 inline" />
                       : p.phase === "confirming"
                         ? "Confirming…"
-                        : p.phase === "compressing"
-                          ? `Compressing… ${p.percent}%`
-                          : `${p.percent}%${p.speedMBps > 0 ? ` — ${p.speedMBps} MB/s` : ""}${p.remainingMins > 0 ? ` — ~${p.remainingMins} min` : ""}`}
+                        : p.phase === "cancelled"
+                          ? "Cancelled"
+                          : p.phase === "paused"
+                            ? "Paused"
+                            : p.phase === "queued"
+                              ? <span className="flex items-center gap-1"><Clock className="w-3 h-3 inline" /> Queued</span>
+                              : `${p.percent}%${p.speedMBps > 0 ? ` · ${p.speedMBps} MB/s` : ""}${p.remainingSecs > 0 ? ` · ${formatTime(p.remainingSecs)}` : ""}`}
                 </span>
+                {onCancelUpload && (p.phase === "uploading" || p.phase === "queued") && (
+                  <button
+                    onClick={() => onCancelUpload(i)}
+                    className="shrink-0 text-muted-foreground hover:text-red-400 transition-colors"
+                    title="Cancel upload"
+                  >
+                    <XCircle className="w-3.5 h-3.5" />
+                  </button>
+                )}
               </div>
             ))}
           </div>
