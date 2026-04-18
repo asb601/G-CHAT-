@@ -52,8 +52,8 @@ export async function uploadFileDirect(
 
   const blockBlobClient = new BlockBlobClient(sas_url);
   await blockBlobClient.uploadData(file, {
-    blockSize: 64 * 1024 * 1024, // 64 MB blocks — optimal for Azure Blob
-    concurrency: 4,               // 4 parallel uploads — sweet spot before throttling
+    blockSize: 8 * 1024 * 1024,   // 8 MB blocks — more parallelism for large files
+    concurrency: 8,               // 8 parallel uploads
     onProgress: (ev) => {
       const now = Date.now();
       const elapsedSec = (now - lastTime) / 1000;

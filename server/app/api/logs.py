@@ -1,0 +1,103 @@
+"""
+Logs API — stream log files from the server for debugging.
+
+GET /api/logs/files           → list available log files
+GET /api/logs/{filename}      → tail N lines from a log file
+GET /api/logs/{filename}/search?q=...  → search a log file
+
+Auth: admin only (ADMIN_EMAIL from settings).
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+
+from app.core.config import get_settings
+from app.core.logger import LOG_DIR
+from app.core.security import get_current_user
+from app.models.user import User
+
+router = APIRouter(prefix="/logs", tags=["logs"])
+
+# Only allow reading known log files — prevent path traversal
+_ALLOWED_FILES = {"system.log", "ai_pipeline.log", "llm_calls.log", "costs.log"}
+
+
+def _require_admin(user: User = Depends(get_current_user)) -> User:
+    settings = get_settings()
+    if user.email != settings.ADMIN_EMAIL:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return user
+
+
+def _safe_log_path(filename: str) -> Path:
+    """Resolve filename and ensure it's within LOG_DIR and in the allowed set."""
+    # Strip any path components — only allow bare filenames
+    clean = Path(filename).name
+    if clean not in _ALLOWED_FILES:
+        raise HTTPException(status_code=404, detail=f"Unknown log file: {clean}")
+    path = (LOG_DIR / clean).resolve()
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail=f"Log file not found: {clean}")
+    return path
+
+
+@router.get("/files")
+async def list_log_files(_: User = Depends(_require_admin)) -> dict:
+    """List available log files with sizes."""
+    files = []
+    for name in sorted(_ALLOWED_FILES):
+        path = LOG_DIR / name
+        if path.exists():
+            size_kb = round(path.stat().st_size / 1024, 1)
+            files.append({"name": name, "size_kb": size_kb})
+    return {"log_dir": str(LOG_DIR), "files": files}
+
+
+@router.get("/{filename}")
+async def tail_log(
+    filename: str,
+    lines: int = Query(default=100, ge=1, le=2000),
+    _: User = Depends(_require_admin),
+) -> dict:
+    """Return the last N lines of a log file (default 100, max 2000)."""
+    path = _safe_log_path(filename)
+    all_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    tail = all_lines[-lines:]
+
+    # Try to parse each line as JSON for structured output
+    parsed = []
+    for line in tail:
+        try:
+            parsed.append(json.loads(line))
+        except (json.JSONDecodeError, ValueError):
+            parsed.append({"raw": line})
+
+    return {"file": filename, "total_lines": len(all_lines), "returned": len(parsed), "lines": parsed}
+
+
+@router.get("/{filename}/search")
+async def search_log(
+    filename: str,
+    q: str = Query(..., min_length=1, max_length=200),
+    lines: int = Query(default=50, ge=1, le=500),
+    _: User = Depends(_require_admin),
+) -> dict:
+    """Search a log file for lines containing query string (case-insensitive)."""
+    path = _safe_log_path(filename)
+    q_lower = q.lower()
+    all_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+
+    matches = []
+    for i, line in enumerate(all_lines):
+        if q_lower in line.lower():
+            try:
+                matches.append({"line_num": i + 1, "data": json.loads(line)})
+            except (json.JSONDecodeError, ValueError):
+                matches.append({"line_num": i + 1, "data": {"raw": line}})
+            if len(matches) >= lines:
+                break
+
+    return {"file": filename, "query": q, "matches": len(matches), "lines": matches}

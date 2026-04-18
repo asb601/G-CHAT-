@@ -16,6 +16,7 @@ from app.api.containers import router as containers_router
 from app.api.users import router as users_router
 from app.api.chat import router as chat_router
 from app.api.admin import router as admin_router
+from app.api.logs import router as logs_router
 import app.models.file  # ensure File table is created
 import app.models.container  # ensure ContainerConfig table is created
 import app.models.file_metadata  # ensure FileMetadata table is created
@@ -103,6 +104,7 @@ app.include_router(containers_router, prefix="/api")
 app.include_router(users_router, prefix="/api")
 app.include_router(chat_router, prefix="/api")
 app.include_router(admin_router, prefix="/api")
+app.include_router(logs_router, prefix="/api")
 
 
 @app.get("/api/health")
