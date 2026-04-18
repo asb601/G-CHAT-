@@ -1,0 +1,34 @@
+name: Deploy to VM
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy to Azure VM
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          script: |
+            cd ~/G-CHAT-
+
+            # Pull latest code
+            git pull origin main
+
+            # Write .env from GitHub Secret
+            cat > ~/G-CHAT-/server/.env << 'ENVEOF'
+            ${{ secrets.SERVER_ENV }}
+            ENVEOF
+
+            # Restart backend service
+            sudo systemctl restart gchat
+
+            # Wait and verify
+            sleep 3
+            curl -s http://localhost:8000/api/health && echo " Backend OK"
