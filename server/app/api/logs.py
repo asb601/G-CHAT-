@@ -97,6 +97,8 @@ async def file_timings(
         meta = meta_map.get(f.id)
         job = jobs_map.get(f.id)
 
+        upload_secs = f.upload_duration_secs
+
         ingestion_secs = None
         if meta and meta.ingested_at and f.created_at:
             ingestion_secs = round((meta.ingested_at - f.created_at).total_seconds(), 1)
@@ -105,14 +107,21 @@ async def file_timings(
         if job and job.completed_at and job.started_at:
             parquet_secs = round((job.completed_at - job.started_at).total_seconds(), 1)
 
+        # Total = upload + ingestion (if both available)
+        total_secs = None
+        if upload_secs is not None and ingestion_secs is not None:
+            total_secs = round(upload_secs + ingestion_secs, 1)
+
         rows.append({
             "file_id": f.id,
             "name": f.name,
             "size": f.size,
             "ingest_status": f.ingest_status,
             "uploaded_at": f.created_at.isoformat() if f.created_at else None,
+            "upload_secs": upload_secs,
             "ingested_at": meta.ingested_at.isoformat() if meta and meta.ingested_at else None,
             "ingestion_secs": ingestion_secs,
+            "total_secs": total_secs,
             "parquet_status": job.status if job else None,
             "parquet_started_at": job.started_at.isoformat() if job and job.started_at else None,
             "parquet_completed_at": job.completed_at.isoformat() if job and job.completed_at else None,

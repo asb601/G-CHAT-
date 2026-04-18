@@ -228,8 +228,10 @@ interface FileTiming {
   size: number;
   ingest_status: string;
   uploaded_at: string | null;
+  upload_secs: number | null;
   ingested_at: string | null;
   ingestion_secs: number | null;
+  total_secs: number | null;
   parquet_status: string | null;
   parquet_started_at: string | null;
   parquet_completed_at: string | null;
@@ -338,8 +340,10 @@ function PerformancePanel() {
               <th className="px-4 py-2 font-medium">File</th>
               <th className="px-3 py-2 font-medium">Size</th>
               <th className="px-3 py-2 font-medium">Uploaded</th>
-              <th className="px-3 py-2 font-medium">Ingestion</th>
+              <th className="px-3 py-2 font-medium text-center">Upload Time</th>
+              <th className="px-3 py-2 font-medium">Status</th>
               <th className="px-3 py-2 font-medium text-center">Ingestion Time</th>
+              <th className="px-3 py-2 font-medium text-center">Total Time</th>
               <th className="px-3 py-2 font-medium">Parquet</th>
               <th className="px-3 py-2 font-medium text-center">Parquet Time</th>
             </tr>
@@ -356,14 +360,34 @@ function PerformancePanel() {
                 <td className="px-3 py-2 text-muted-foreground whitespace-nowrap">
                   {formatDateTime(t.uploaded_at)}
                 </td>
+                <td className="px-3 py-2 text-center">
+                  {t.upload_secs !== null ? (
+                    <span className="flex items-center justify-center gap-1 text-foreground font-mono">
+                      <Upload className="w-3 h-3 text-blue-400" />
+                      {formatSecs(t.upload_secs)}
+                    </span>
+                  ) : (
+                    <span className="text-muted-foreground">—</span>
+                  )}
+                </td>
                 <td className="px-3 py-2">
                   <StatusBadge status={t.ingest_status} />
                 </td>
                 <td className="px-3 py-2 text-center">
                   {t.ingestion_secs !== null ? (
                     <span className="flex items-center justify-center gap-1 text-foreground font-mono">
-                      <Clock className="w-3 h-3 text-muted-foreground" />
+                      <Zap className="w-3 h-3 text-yellow-400" />
                       {formatSecs(t.ingestion_secs)}
+                    </span>
+                  ) : (
+                    <span className="text-muted-foreground">—</span>
+                  )}
+                </td>
+                <td className="px-3 py-2 text-center">
+                  {t.total_secs !== null ? (
+                    <span className="flex items-center justify-center gap-1 text-foreground font-mono font-semibold">
+                      <Clock className="w-3 h-3 text-green-400" />
+                      {formatSecs(t.total_secs)}
                     </span>
                   ) : (
                     <span className="text-muted-foreground">—</span>
@@ -392,7 +416,7 @@ function PerformancePanel() {
             ))}
             {timings.length === 0 && !loading && (
               <tr>
-                <td colSpan={7} className="px-4 py-8 text-center text-muted-foreground">
+                <td colSpan={9} className="px-4 py-8 text-center text-muted-foreground">
                   No files found
                 </td>
               </tr>

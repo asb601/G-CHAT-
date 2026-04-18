@@ -82,6 +82,7 @@ class ConfirmUploadRequest(BaseModel):
     filename: str
     content_type: str | None = None
     size: int
+    upload_duration_secs: float | None = None
     folder_id: str | None = None
     container_id: str
 
@@ -152,6 +153,7 @@ async def confirm_upload(
         uploaded_by_id=admin.id,
         blob_path=body.blob_name,
         ingest_status="not_ingested",
+        upload_duration_secs=body.upload_duration_secs,
     )
 
     db.add(db_file)

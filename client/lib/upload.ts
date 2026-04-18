@@ -137,6 +137,7 @@ export async function uploadFileDirect(
   // 2. Upload directly to Azure Blob — 4MB blocks, 6 parallel
   onProgress({ fileIndex, fileName: filename, percent: 0, speedMBps: 0, remainingSecs: 0, phase: "uploading" });
 
+  const uploadStartTime = Date.now();
   const tracker = new SpeedTracker();
   const fileSize = file.size;
 
@@ -158,6 +159,7 @@ export async function uploadFileDirect(
   });
 
   // 3. Confirm upload with backend
+  const uploadDurationSecs = parseFloat(((Date.now() - uploadStartTime) / 1000).toFixed(1));
   onProgress({ fileIndex, fileName: filename, percent: 99, speedMBps: 0, remainingSecs: 0, phase: "confirming" });
 
   const confirmRes = await apiFetch("/api/files/confirm-upload", {
@@ -169,6 +171,7 @@ export async function uploadFileDirect(
       filename,
       content_type: file.type || undefined,
       size: file.size,
+      upload_duration_secs: uploadDurationSecs,
       folder_id: folderId,
       container_id: containerId,
     }),
