@@ -32,6 +32,14 @@ jobs:
             # Restart backend service
             sudo systemctl restart gchat
 
-            # Wait and verify
-            sleep 3
-            curl -s http://localhost:8000/api/health && echo " Backend OK"
+            # Wait for uvicorn to fully start, then verify
+            for i in $(seq 1 10); do
+              sleep 3
+              STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/api/health)
+              if [ "$STATUS" = "200" ]; then
+                echo " Backend OK"
+                exit 0
+              fi
+              echo "Waiting... attempt $i (status: $STATUS)"
+            done
+            echo "Backend did not become healthy" && exit 1
