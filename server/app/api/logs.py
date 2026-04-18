@@ -17,10 +17,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.logger import LOG_DIR
-from app.core.security import get_current_user
+from app.core.security import require_admin
 from app.models.background_job import BackgroundJob
 from app.models.file import File
 from app.models.file_metadata import FileMetadata
@@ -30,13 +29,6 @@ router = APIRouter(prefix="/logs", tags=["logs"])
 
 # Only allow reading known log files — prevent path traversal
 _ALLOWED_FILES = {"system.log", "ai_pipeline.log", "llm_calls.log", "costs.log"}
-
-
-def _require_admin(user: User = Depends(get_current_user)) -> User:
-    settings = get_settings()
-    if user.email != settings.ADMIN_EMAIL:
-        raise HTTPException(status_code=403, detail="Admin access required")
-    return user
 
 
 def _safe_log_path(filename: str) -> Path:
@@ -52,7 +44,7 @@ def _safe_log_path(filename: str) -> Path:
 
 
 @router.get("/files")
-async def list_log_files(_: User = Depends(_require_admin)) -> dict:
+async def list_log_files(_: User = Depends(require_admin)) -> dict:
     """List available log files with sizes."""
     files = []
     for name in sorted(_ALLOWED_FILES):
@@ -65,7 +57,7 @@ async def list_log_files(_: User = Depends(_require_admin)) -> dict:
 
 @router.get("/file-timings")
 async def file_timings(
-    _: User = Depends(_require_admin),
+    _: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
     limit: int = Query(default=50, ge=1, le=200),
 ) -> dict:
@@ -142,7 +134,7 @@ async def file_timings(
 async def tail_log(
     filename: str,
     lines: int = Query(default=100, ge=1, le=2000),
-    _: User = Depends(_require_admin),
+    _: User = Depends(require_admin),
 ) -> dict:
     """Return the last N lines of a log file (default 100, max 2000)."""
     path = _safe_log_path(filename)
@@ -165,7 +157,7 @@ async def search_log(
     filename: str,
     q: str = Query(..., min_length=1, max_length=200),
     lines: int = Query(default=50, ge=1, le=500),
-    _: User = Depends(_require_admin),
+    _: User = Depends(require_admin),
 ) -> dict:
     """Search a log file for lines containing query string (case-insensitive)."""
     path = _safe_log_path(filename)
