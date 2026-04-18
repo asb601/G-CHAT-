@@ -21,6 +21,9 @@ jobs:
             # Pull latest code
             git pull origin main
 
+            # Remove client folder — VM only needs server
+            rm -rf ~/G-CHAT-/client
+
             # Write .env from GitHub Secret
             cat > ~/G-CHAT-/server/.env << 'ENVEOF'
             ${{ secrets.SERVER_ENV }}
