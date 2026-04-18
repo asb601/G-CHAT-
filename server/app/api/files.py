@@ -80,8 +80,10 @@ class ConfirmUploadRequest(BaseModel):
     file_id: str
     blob_name: str
     filename: str
+    original_filename: str | None = None  # original name before .gz compression
     content_type: str | None = None
-    size: int
+    size: int                              # original file size
+    compressed_size: int | None = None     # compressed size (if gzipped)
     folder_id: str | None = None
     container_id: str
 
@@ -139,11 +141,13 @@ async def confirm_upload(
         if not result.scalar_one_or_none():
             raise HTTPException(status_code=404, detail="Folder not found")
 
-    mime = body.content_type or mimetypes.guess_type(body.filename)[0] or "application/octet-stream"
+    # Use original filename for display if file was compressed
+    display_name = body.original_filename or body.filename
+    mime = mimetypes.guess_type(display_name)[0] or "application/octet-stream"
 
     db_file = File(
         id=body.file_id,
-        name=body.filename,
+        name=display_name,
         content_type=mime,
         size=body.size,
         folder_id=body.folder_id,
@@ -153,6 +157,12 @@ async def confirm_upload(
         blob_path=body.blob_name,
         ingest_status="not_ingested",
     )
+
+    if body.compressed_size:
+        upload_logger.info("compressed_upload", file_id=body.file_id,
+                           original_size_mb=round(body.size / 1024 / 1024, 1),
+                           compressed_size_mb=round(body.compressed_size / 1024 / 1024, 1),
+                           ratio=round(body.size / body.compressed_size, 1))
     db.add(db_file)
 
     db_start = time.perf_counter()
@@ -164,7 +174,9 @@ async def confirm_upload(
     upload_logger.info("confirm_complete", file_id=body.file_id, filename=body.filename, duration_ms=round((time.perf_counter() - start) * 1000, 2))
 
     # Auto-ingest CSV/TXT files in the background
-    ext = (body.filename or "").rsplit(".", 1)[-1].lower()
+    # Use original filename to determine type (file may be .csv.gz on blob)
+    ingest_name = body.original_filename or body.filename
+    ext = (ingest_name or "").rsplit(".", 1)[-1].lower()
     if ext in ("csv", "txt", "tsv"):
         asyncio.create_task(_background_ingest(body.file_id))
 

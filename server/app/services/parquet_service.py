@@ -165,7 +165,11 @@ async def convert_csv_to_parquet(
     Returns {"parquet_blob_path": str, "size_bytes": int}
     Raises on any failure — caller is responsible for catching and recording the error.
     """
-    parquet_blob_path = blob_path.rsplit(".", 1)[0] + ".parquet"
+    # Handle .csv.gz → .parquet (strip .gz then .csv/.tsv/.txt)
+    base = blob_path
+    if base.endswith(".gz"):
+        base = base[:-3]
+    parquet_blob_path = base.rsplit(".", 1)[0] + ".parquet"
 
     start = time.perf_counter()
     ingest_logger.info("parquet_service", operation="convert_csv_to_parquet",
@@ -340,7 +344,11 @@ async def convert_csv_to_parquet(
     Returns {"parquet_blob_path": str, "size_bytes": int}
     Raises on any failure — caller is responsible for catching and recording the error.
     """
-    parquet_blob_path = blob_path.rsplit(".", 1)[0] + ".parquet"
+    # Handle .csv.gz → .parquet (strip .gz then .csv/.tsv/.txt)
+    base = blob_path
+    if base.endswith(".gz"):
+        base = base[:-3]
+    parquet_blob_path = base.rsplit(".", 1)[0] + ".parquet"
 
     start = time.perf_counter()
     ingest_logger.info("parquet_service", operation="convert_csv_to_parquet",

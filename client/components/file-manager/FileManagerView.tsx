@@ -51,7 +51,7 @@ export interface UploadProgressItem {
   percent: number;
   speedMBps: number;
   remainingMins: number;
-  phase: "uploading" | "confirming" | "done" | "error";
+  phase: "compressing" | "uploading" | "confirming" | "done" | "error";
 }
 
 interface ContainerOption {
@@ -790,7 +790,9 @@ export default function FileManagerView({
                       ? <Check className="w-3 h-3 text-green-500 inline" />
                       : p.phase === "confirming"
                         ? "Confirming…"
-                        : `${p.percent}%${p.speedMBps > 0 ? ` — ${p.speedMBps} MB/s` : ""}${p.remainingMins > 0 ? ` — ~${p.remainingMins} min` : ""}`}
+                        : p.phase === "compressing"
+                          ? `Compressing… ${p.percent}%`
+                          : `${p.percent}%${p.speedMBps > 0 ? ` — ${p.speedMBps} MB/s` : ""}${p.remainingMins > 0 ? ` — ~${p.remainingMins} min` : ""}`}
                 </span>
               </div>
             ))}

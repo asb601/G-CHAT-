@@ -2,7 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState, useEffect } from "react";
-import { MessageSquare, FolderOpen, LogOut, PanelLeftClose, PanelLeft, Database, UserCircle } from "lucide-react";
+import { MessageSquare, FolderOpen, LogOut, PanelLeftClose, PanelLeft, Database, UserCircle, ScrollText } from "lucide-react";
 import { NavLink, MobileNavLink } from "@/components/nav-link";
 import { AuthProvider, useAuth } from "@/components/auth-provider";
 
@@ -41,6 +41,7 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
     ...(user.is_admin
       ? [
           { href: "/admin/containers", icon: Database, label: "Containers" },
+          { href: "/admin/logs", icon: ScrollText, label: "Logs" },
         ]
       : []),
     { href: "/profile", icon: UserCircle, label: "Profile" },

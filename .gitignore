@@ -38,7 +38,7 @@ next-env.d.ts
 
 # Logs
 *.log
-logs/
+server/logs/
 
 # Uploads & temp files
 server/uploads/
