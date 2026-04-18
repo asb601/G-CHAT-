@@ -32,7 +32,7 @@ async function compressFile(
 
   // Collect compressed chunks and report progress
   const reader = gzipStream.getReader();
-  const chunks: Uint8Array[] = [];
+  const chunks: BlobPart[] = [];
   let compressedSize = 0;
   // Estimate progress based on read position vs file size
   let readSoFar = 0;
