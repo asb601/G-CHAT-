@@ -286,3 +286,37 @@ Step 8 is always last.
 | `server/app/core/duckdb_client.py` | Remove `convert_to_parquet()` | 8 |
 
 **Total: 3 new files, 4 modified files, 2 deleted files, 1 pyproject.toml change**
+
+---
+
+## VM Deployment — CORS Fix ✅ Resolved
+
+### Problem
+The Vercel frontend (`https://g-chat-xi.vercel.app`) gets CORS-blocked when calling the API at `https://genai.codeen.in.net`. FastAPI's `CORSMiddleware` reads `FRONTEND_URL` from `.env` on the VM — if it's set to `http://localhost:3000`, the Vercel origin is rejected.
+
+### Status: FIXED
+- VM `.env` has `FRONTEND_URL=https://g-chat-xi.vercel.app`
+- Vercel env has `NEXT_PUBLIC_API_URL=https://genai.codeen.in.net`
+- Verified working on multiple client laptops
+
+### Fix (run on VM)
+
+```bash
+# 1. Check current value
+grep FRONTEND_URL /home/azureuser/G-CHAT-/server/.env
+
+# 2. Set correct origin
+sed -i 's|FRONTEND_URL=.*|FRONTEND_URL=https://g-chat-xi.vercel.app|' /home/azureuser/G-CHAT-/server/.env
+
+# 3. Restart the service
+sudo systemctl restart gchat
+
+# 4. Verify CORS header is returned
+curl -sI -H "Origin: https://g-chat-xi.vercel.app" https://genai.codeen.in.net/api/health | grep -i access-control
+# Expected: access-control-allow-origin: https://g-chat-xi.vercel.app
+```
+
+### Code Reference
+- `server/app/main.py` — `allow_origins=[settings.FRONTEND_URL, "http://localhost:3000"]`
+- `server/app/core/config.py` — `FRONTEND_URL: str = "http://localhost:3000"` (default)
+- `client/vercel.json` — `NEXT_PUBLIC_API_URL=https://genai.codeen.in.net`

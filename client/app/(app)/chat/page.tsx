@@ -772,6 +772,23 @@ export default function ChatPage() {
               if (!activeConvId || activeConvId !== event.conversation_id) {
                 setActiveConvId(event.conversation_id);
               }
+            } else if (event.event === "thinking") {
+              // Show which tool is running (e.g. "Running run_sql...")
+              const toolName = event.tool || "tools";
+              if (!streamMsgId) {
+                streamMsgId = crypto.randomUUID();
+                setMessages((prev) => [
+                  ...prev,
+                  { id: streamMsgId!, role: "assistant", content: `Running ${toolName}...` },
+                ]);
+              } else {
+                const currentId = streamMsgId;
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === currentId ? { ...m, content: `Running ${toolName}...` } : m
+                  )
+                );
+              }
             } else if (event.event === "token") {
               streamedContent += event.content;
               if (!streamMsgId) {
@@ -821,8 +838,24 @@ export default function ChatPage() {
         }
       }
 
-      // Refresh sidebar
-      fetchConversations(searchQuery);
+      // Optimistic sidebar update — no full refetch
+      const resultConvId = finalResult?.conversation_id || activeConvId;
+      if (resultConvId) {
+        setConversations((prev) => {
+          const exists = prev.some((c) => c.id === resultConvId);
+          if (exists) {
+            return prev.map((c) =>
+              c.id === resultConvId
+                ? { ...c, message_count: (c.message_count || 0) + 2, updated_at: new Date().toISOString() }
+                : c
+            );
+          }
+          // New conversation — add it at the top, then do one background refresh
+          // to get the server-generated title
+          fetchConversations(searchQuery);
+          return prev;
+        });
+      }
     } catch (err: unknown) {
       const errMsg = err instanceof Error ? err.message : "Something went wrong.";
       setMessages((prev) => [

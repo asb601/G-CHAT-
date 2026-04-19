@@ -8,7 +8,7 @@ import json
 import time
 import threading
 import uuid
-from typing import Any, Literal
+from typing import Any, AsyncIterator, Literal
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
@@ -344,6 +344,265 @@ async def run_agent_query(query: str, db: AsyncSession, *, conversation_context:
             for blob in _extract_blob_paths(msg.content)
         }),
         "tool_calls": tool_calls_made,
+    }
+
+
+# ── Streaming entry point (astream_events) ───────────────────────────────────
+
+async def run_agent_query_stream(
+    query: str,
+    db: AsyncSession,
+    *,
+    conversation_context: str = "",
+) -> AsyncIterator[dict]:
+    """
+    Streaming variant of run_agent_query.
+
+    Yields dicts:
+      {"type": "thinking", "tool": tool_name}          — tool call started
+      {"type": "token", "content": str}                 — LLM token chunk
+      {"type": "tool_result", "tool": name, "preview": str}  — tool finished
+      {"type": "done", "payload": {answer, data, chart, ...}} — final result
+
+    Uses LangGraph's astream_events(version="v2") so the LLM's final
+    answer tokens stream to the client as they're generated — not after
+    the entire agent loop finishes.
+    """
+    pipeline_start = time.perf_counter()
+
+    # ── Reuse the same setup as run_agent_query ──
+    all_meta = list((await db.execute(select(FileMetadata))).scalars().all())
+    if not all_meta:
+        yield {
+            "type": "done",
+            "payload": {
+                "answer": "No files have been ingested yet. Please upload and ingest some files first.",
+                "data": [], "chart": None, "route": "agent", "row_count": 0,
+                "files_used": [], "tool_calls": 0,
+            },
+        }
+        return
+
+    catalog = [
+        {
+            "file_id": m.file_id,
+            "blob_path": m.blob_path,
+            "container_id": m.container_id,
+            "ai_description": m.ai_description or "",
+            "good_for": m.good_for or [],
+            "key_metrics": m.key_metrics or [],
+            "key_dimensions": m.key_dimensions or [],
+            "columns_info": m.columns_info or [],
+            "date_range_start": str(m.date_range_start) if m.date_range_start else None,
+            "date_range_end": str(m.date_range_end) if m.date_range_end else None,
+        }
+        for m in all_meta
+    ]
+
+    all_rels = list((await db.execute(select(FileRelationship))).scalars().all())
+    relationships = [
+        {
+            "file_a_path": r.file_a_path,
+            "file_b_path": r.file_b_path,
+            "shared_column": r.shared_column,
+            "confidence_score": r.confidence_score,
+        }
+        for r in all_rels
+    ]
+
+    first_meta = all_meta[0]
+    container = await db.get(ContainerConfig, first_meta.container_id)
+    if not container:
+        yield {
+            "type": "done",
+            "payload": {"answer": "Container configuration not found.", "data": [], "chart": None,
+                        "route": "agent", "row_count": 0, "files_used": [], "tool_calls": 0},
+        }
+        return
+
+    connection_string = container.connection_string
+    container_name = container.container_name
+
+    all_analytics_rows = list((await db.execute(select(FileAnalytics))).scalars().all())
+    analytics_by_file = {row.file_id: row for row in all_analytics_rows}
+
+    parquet_blob_path = None
+    parquet_paths_all: dict[str, str] = {}
+    for meta in all_meta:
+        ar = analytics_by_file.get(meta.file_id)
+        if not ar:
+            continue
+        if parquet_blob_path is None:
+            parquet_blob_path = ar.parquet_blob_path
+        if ar.parquet_blob_path and meta.blob_path:
+            parquet_paths_all[meta.blob_path] = ar.parquet_blob_path
+
+    sample_rows = first_meta.sample_rows or []
+
+    req_id = uuid.uuid4().hex
+    store: dict = {}
+    with _stores_lock:
+        _request_stores[req_id] = store
+
+    all_tools = []
+    all_tools.extend(build_sql_tools(connection_string, container_name, parquet_blob_path, store))
+    all_tools.extend(build_catalog_tools(catalog, relationships))
+    all_tools.extend(build_stats_tool(store))
+    all_tools.extend(build_sample_tool(sample_rows))
+
+    graph = _build_graph(all_tools)
+
+    # Build system prompt (identical to non-streaming)
+    columns_by_blob: dict[str, list[str]] = {}
+    for entry in catalog:
+        cols = [c["name"] for c in (entry.get("columns_info") or [])]
+        if cols and entry.get("blob_path"):
+            columns_by_blob[entry["blob_path"]] = cols
+
+    parquet_note = ""
+    if parquet_paths_all:
+        lines = []
+        for blob, pq in parquet_paths_all.items():
+            line = f"  read_parquet('az://{container_name}/{pq}')"
+            col_list = columns_by_blob.get(blob)
+            if col_list:
+                line += f"\n    Columns: {', '.join(col_list)}"
+            desc = next((e.get("ai_description") for e in catalog if e.get("blob_path") == blob), None)
+            if desc:
+                line += f"\n    Description: {desc}"
+            lines.append(line)
+        parquet_note = (
+            "Available parquet files (use directly in run_sql — no search_catalog needed):\n"
+            + "\n".join(lines)
+            + "\nParquet covers the FULL dataset. Use it for any ordering, filtering, counting, or row retrieval."
+        )
+    elif parquet_blob_path:
+        cols_line = ""
+        first_cols = columns_by_blob.get(first_meta.blob_path)
+        if first_cols:
+            cols_line = f"\n    Columns: {', '.join(first_cols)}"
+        parquet_note = (
+            f"Parquet path (use directly in run_sql — no search_catalog needed):\n"
+            f"  read_parquet('az://{container_name}/{parquet_blob_path}')"
+            + cols_line
+            + "\nParquet covers the FULL dataset. Use it for any ordering, filtering, counting, or row retrieval."
+        )
+
+    sample_note = ""
+    if sample_rows:
+        sample_note = (
+            f"\nData format preview: {len(sample_rows)} example rows from ingest available via"
+            " inspect_data_format() — use to understand column formats before writing SQL."
+        )
+
+    system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
+        container_name=container_name,
+        max_calls=MAX_TOOL_CALLS,
+        parquet_note=parquet_note,
+        sample_note=sample_note,
+    )
+    if conversation_context:
+        system_prompt += (
+            "\n\n--- CONVERSATION HISTORY ---\n"
+            "The user is continuing a conversation. Use this context to understand "
+            "follow-up questions, pronouns ('it', 'that', 'those'), and references "
+            "to previous queries or results.\n\n"
+            f"{conversation_context}\n"
+            "---\n"
+        )
+
+    initial_state: AgentState = {
+        "messages": [SystemMessage(content=system_prompt), HumanMessage(content=query)],
+        "catalog": catalog,
+        "relationships": relationships,
+        "connection_string": connection_string,
+        "container_name": container_name,
+        "parquet_blob_path": parquet_blob_path,
+        "tool_call_count": 0,
+        "request_id": req_id,
+    }
+
+    chat_logger.info("agent_stream_start", query=query[:200], file_count=len(catalog))
+
+    # ── Stream events from LangGraph ──
+    answer_tokens: list[str] = []
+    tool_calls_made = 0
+    files_used: set[str] = set()
+    final_answer = ""
+
+    try:
+        async for event in graph.astream_events(initial_state, version="v2"):
+            kind = event["event"]
+
+            # LLM token streaming — the main win: tokens arrive as generated
+            if kind == "on_chat_model_stream":
+                chunk = event["data"].get("chunk")
+                if chunk:
+                    # Skip tool-call turns — only stream actual answer text
+                    tool_calls = getattr(chunk, "tool_calls", None) or getattr(chunk, "tool_call_chunks", None)
+                    if tool_calls:
+                        continue
+                    content = chunk.content if hasattr(chunk, "content") else ""
+                    if content and isinstance(content, str):
+                        answer_tokens.append(content)
+                        yield {"type": "token", "content": content}
+
+            # Tool call started — let frontend show "Running SQL..." etc.
+            elif kind == "on_tool_start":
+                tool_name = event.get("name", "")
+                tool_calls_made += 1
+                yield {"type": "thinking", "tool": tool_name}
+
+            # Tool call finished — extract blob paths for files_used
+            elif kind == "on_tool_end":
+                tool_output = event["data"].get("output", "")
+                if isinstance(tool_output, str):
+                    files_used.update(_extract_blob_paths(tool_output))
+
+    except Exception as exc:
+        chat_logger.exception("agent_stream_error", error=str(exc)[:400])
+        yield {
+            "type": "done",
+            "payload": {
+                "answer": "An error occurred while processing your query. Please try again.",
+                "data": [], "chart": None, "route": "agent",
+                "row_count": 0, "files_used": [], "tool_calls": 0,
+            },
+        }
+        return
+    finally:
+        with _stores_lock:
+            _request_stores.pop(req_id, None)
+
+    # ── Build final payload from collected data ──
+    # The full answer is the concatenation of all streamed tokens.
+    # But if the agent made tool calls, the last AI message with no tool_calls
+    # is the actual answer (tokens only capture the final LLM turn's output,
+    # not tool-calling turns). So we prefer the store's SQL results + assembled answer.
+    final_answer = "".join(answer_tokens) if answer_tokens else ""
+
+    sql_results = store.get("sql_results", [])
+    total_ms = round((time.perf_counter() - pipeline_start) * 1000, 2)
+
+    chat_logger.info("agent_stream_complete",
+                     tool_calls=tool_calls_made,
+                     row_count=len(sql_results),
+                     total_duration_ms=total_ms,
+                     answer_len=len(final_answer))
+
+    chart = _infer_chart(final_answer, sql_results)
+
+    yield {
+        "type": "done",
+        "payload": {
+            "answer": final_answer,
+            "data": sql_results,
+            "chart": chart,
+            "route": "agent",
+            "row_count": len(sql_results),
+            "files_used": list(files_used),
+            "tool_calls": tool_calls_made,
+        },
     }
 
 

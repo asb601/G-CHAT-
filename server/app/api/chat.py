@@ -17,7 +17,7 @@ from app.models.file import File
 from app.models.file_metadata import FileMetadata
 from app.models.user import User
 from app.models.conversation import Conversation, Message
-from app.agent import run_agent_query
+from app.agent import run_agent_query, run_agent_query_stream
 from app.services.ingestion_service import ingest_file
 from app.services.context_service import (
     build_conversation_context,
@@ -228,7 +228,7 @@ async def chat_message_stream(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Streaming wrapper — validates, saves user msg, then streams agent progress via SSE."""
+    """True SSE streaming — tokens arrive as the LLM generates them."""
     import json as _json
 
     query = body.query.strip()
@@ -239,7 +239,7 @@ async def chat_message_stream(
 
     trace_id = f"chat-{uuid.uuid4().hex[:12]}"
 
-    # ── Resolve or create conversation (same logic as non-streaming) ──
+    # ── Resolve or create conversation ──
     if body.conversation_id:
         conv = await db.get(Conversation, body.conversation_id)
         if not conv or conv.user_id != user.id:
@@ -283,49 +283,64 @@ async def chat_message_stream(
     conv_id = conv.id
 
     async def event_stream():
-        # Send conversation_id immediately so frontend can track it
         yield f"data: {_json.dumps({'event': 'started', 'conversation_id': conv_id})}\n\n"
 
         try:
-            yield f"data: {_json.dumps({'event': 'thinking'})}\n\n"
+            final_payload = None
 
-            result = await run_agent_query(query, db, conversation_context=conversation_context)
+            async for evt in run_agent_query_stream(query, db, conversation_context=conversation_context):
+                evt_type = evt["type"]
 
-            full_data = result.get("data", [])
-            stored_data = full_data[:MAX_STORED_DATA_ROWS]
-            answer_text = result.get("answer", "")
-            assistant_token_count = count_tokens(answer_text)
+                if evt_type == "token":
+                    yield f"data: {_json.dumps({'event': 'token', 'content': evt['content']})}\n\n"
 
-            db.add(Message(
-                conversation_id=conv_id, role="assistant", content=answer_text,
-                token_count=assistant_token_count,
-                payload={
-                    "data": stored_data,
-                    "data_truncated": len(full_data) > MAX_STORED_DATA_ROWS,
-                    "chart": result.get("chart"),
-                    "row_count": result.get("row_count", 0),
-                    "files_used": result.get("files_used", []),
-                    "tool_calls": result.get("tool_calls", 0),
-                },
-            ))
-            upd_conv = await db.get(Conversation, conv_id)
-            if upd_conv:
-                upd_conv.updated_at = datetime.now(timezone.utc)
-                upd_conv.token_count = (upd_conv.token_count or 0) + assistant_token_count
-            await db.commit()
+                elif evt_type == "thinking":
+                    yield f"data: {_json.dumps({'event': 'thinking', 'tool': evt.get('tool', '')})}\n\n"
 
-            # Stream the answer in chunks for perceived speed
-            chunk_size = 80
-            for i in range(0, len(answer_text), chunk_size):
-                chunk = answer_text[i:i + chunk_size]
-                yield f"data: {_json.dumps({'event': 'token', 'content': chunk})}\n\n"
+                elif evt_type == "tool_result":
+                    yield f"data: {_json.dumps({'event': 'tool_result', 'tool': evt.get('tool', '')})}\n\n"
 
-            # Send full result as final event
-            result["conversation_id"] = conv_id
-            yield f"data: {_json.dumps({'event': 'done', 'result': result})}\n\n"
+                elif evt_type == "done":
+                    final_payload = evt["payload"]
 
-            # Fire background tasks
-            background_tasks.add_task(_bg_title_and_summary, conv_id)
+            # ── Persist assistant message ──
+            if final_payload:
+                answer_text = final_payload.get("answer", "")
+                full_data = final_payload.get("data", [])
+                stored_data = full_data[:MAX_STORED_DATA_ROWS]
+                assistant_token_count = count_tokens(answer_text)
+
+                db.add(Message(
+                    conversation_id=conv_id, role="assistant", content=answer_text,
+                    token_count=assistant_token_count,
+                    payload={
+                        "data": stored_data,
+                        "data_truncated": len(full_data) > MAX_STORED_DATA_ROWS,
+                        "chart": final_payload.get("chart"),
+                        "row_count": final_payload.get("row_count", 0),
+                        "files_used": final_payload.get("files_used", []),
+                        "tool_calls": final_payload.get("tool_calls", 0),
+                    },
+                ))
+                upd_conv = await db.get(Conversation, conv_id)
+                if upd_conv:
+                    upd_conv.updated_at = datetime.now(timezone.utc)
+                    upd_conv.token_count = (upd_conv.token_count or 0) + assistant_token_count
+                await db.commit()
+
+                final_payload["conversation_id"] = conv_id
+
+                # Add nearing-limit warning
+                new_count = msg_count + 2
+                if new_count >= WARN_MESSAGES_THRESHOLD:
+                    final_payload["warning"] = (
+                        f"This conversation has {new_count}/{MAX_MESSAGES_PER_CONVERSATION} messages. "
+                        "It will auto-continue in a new thread when full."
+                    )
+
+                yield f"data: {_json.dumps({'event': 'done', 'result': final_payload})}\n\n"
+
+                background_tasks.add_task(_bg_title_and_summary, conv_id)
 
         except Exception as exc:
             try:

@@ -29,6 +29,10 @@ jobs:
             ${{ secrets.SERVER_ENV }}
             ENVEOF
 
+            # Run DB migrations (safe no-op if columns already exist)
+            cd ~/G-CHAT-/server
+            uv run python -m app.migrations.chat_memory_upgrade
+
             # Restart backend service
             sudo systemctl restart gchat
 
