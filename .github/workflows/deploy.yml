@@ -16,7 +16,6 @@ jobs:
           username: ${{ secrets.VM_USER }}
           key: ${{ secrets.VM_SSH_KEY }}
           script: |
-            set -e
             export PATH="$HOME/.local/bin:$PATH"
 
             cd ~/G-CHAT-
@@ -36,16 +35,23 @@ jobs:
             sudo systemctl restart gchat
 
             # Wait for uvicorn to fully start, then verify
+            HEALTHY=0
             for i in $(seq 1 10); do
               sleep 3
               STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/api/health)
+              echo "Attempt $i: status=$STATUS"
               if [ "$STATUS" = "200" ]; then
-                echo " Backend OK"
+                echo "Backend OK"
+                HEALTHY=1
                 break
               fi
-              echo "Waiting... attempt $i (status: $STATUS)"
-              if [ "$i" = "10" ]; then echo "Backend did not become healthy" && exit 1; fi
             done
+
+            if [ "$HEALTHY" = "0" ]; then
+              echo "Backend did not become healthy"
+              sudo journalctl -u gchat -n 30 --no-pager
+              exit 1
+            fi
 
             # Run DB migrations after service is up (safe no-op if columns already exist)
             cd ~/G-CHAT-/server
