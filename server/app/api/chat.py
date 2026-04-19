@@ -21,6 +21,11 @@ from app.services.ingestion_service import ingest_file
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
+# ── Constants ──
+
+MAX_MESSAGES_PER_CONVERSATION = 200
+MAX_STORED_DATA_ROWS = 50  # Cap SQL result rows persisted in JSONB to prevent DB bloat
+
 
 # ── Schemas ──
 
@@ -63,6 +68,8 @@ async def chat_message(
         conv = await db.get(Conversation, body.conversation_id)
         if not conv or conv.user_id != user.id:
             raise HTTPException(status_code=404, detail="Conversation not found.")
+        if conv.archived_at is not None:
+            raise HTTPException(status_code=410, detail="Conversation has been deleted.")
     else:
         conv = Conversation(
             user_id=user.id,
@@ -71,14 +78,20 @@ async def chat_message(
         db.add(conv)
         await db.flush()  # get conv.id
 
-    # ── Determine next message position ──
+    # ── Determine next message position + enforce cap ──
     pos_result = await db.execute(
         select(func.coalesce(func.max(Message.position), -1))
         .where(Message.conversation_id == conv.id)
     )
     next_pos = pos_result.scalar() + 1
 
-    # ── Save user message ──
+    if next_pos >= MAX_MESSAGES_PER_CONVERSATION:
+        raise HTTPException(
+            status_code=422,
+            detail="Conversation has reached the message limit. Please start a new one.",
+        )
+
+    # ── Save user message immediately (survives agent errors) ──
     user_msg = Message(
         conversation_id=conv.id,
         role="user",
@@ -86,11 +99,18 @@ async def chat_message(
         position=next_pos,
     )
     db.add(user_msg)
+    conv.updated_at = datetime.now(timezone.utc)
+    await db.commit()
 
     chat_logger.info("chain_start", user_id=user.id, conversation_id=conv.id, query=query[:200])
 
     try:
         result = await run_agent_query(query, db)
+
+        # ── Truncate data rows to prevent JSONB bloat ──
+        # Full data is returned to the client, but we only persist a sample.
+        full_data = result.get("data", [])
+        stored_data = full_data[:MAX_STORED_DATA_ROWS]
 
         # ── Save assistant message ──
         assistant_msg = Message(
@@ -99,7 +119,8 @@ async def chat_message(
             content=result.get("answer", ""),
             position=next_pos + 1,
             payload={
-                "data": result.get("data", []),
+                "data": stored_data,
+                "data_truncated": len(full_data) > MAX_STORED_DATA_ROWS,
                 "chart": result.get("chart"),
                 "row_count": result.get("row_count", 0),
                 "files_used": result.get("files_used", []),
@@ -107,8 +128,6 @@ async def chat_message(
             },
         )
         db.add(assistant_msg)
-
-        # Touch updated_at
         conv.updated_at = datetime.now(timezone.utc)
         await db.commit()
 
@@ -121,7 +140,20 @@ async def chat_message(
         return result
 
     except Exception as exc:
-        await db.rollback()
+        # User message already committed — save error as assistant reply
+        try:
+            error_msg = Message(
+                conversation_id=conv.id,
+                role="assistant",
+                content="Failed to process query. Please try again.",
+                position=next_pos + 1,
+                payload={"error": True},
+            )
+            db.add(error_msg)
+            await db.commit()
+        except Exception:
+            await db.rollback()
+
         chat_logger.exception("chain_end", outcome="error", error=str(exc)[:500])
         raise HTTPException(status_code=500, detail="Failed to process query. Please try again.")
     finally:
@@ -136,21 +168,29 @@ async def chat_message(
 async def list_conversations(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    search: str = Query(default="", max_length=200),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    filters = [Conversation.user_id == user.id, Conversation.archived_at.is_(None)]
+    if search.strip():
+        filters.append(Conversation.title.ilike(f"%{search.strip()}%"))
+
     q = (
-        select(Conversation)
-        .where(Conversation.user_id == user.id, Conversation.archived_at.is_(None))
+        select(
+            Conversation,
+            func.count(Message.id).label("message_count"),
+        )
+        .outerjoin(Message, Message.conversation_id == Conversation.id)
+        .where(*filters)
+        .group_by(Conversation.id)
         .order_by(Conversation.updated_at.desc())
         .offset(offset)
         .limit(limit)
     )
-    rows = list((await db.execute(q)).scalars().all())
+    rows = list((await db.execute(q)).all())
 
-    count_q = select(func.count(Conversation.id)).where(
-        Conversation.user_id == user.id, Conversation.archived_at.is_(None)
-    )
+    count_q = select(func.count(Conversation.id)).where(*filters)
     total = (await db.execute(count_q)).scalar()
 
     return {
@@ -160,8 +200,9 @@ async def list_conversations(
                 "title": c.title,
                 "created_at": c.created_at.isoformat(),
                 "updated_at": c.updated_at.isoformat(),
+                "message_count": msg_count,
             }
-            for c in rows
+            for c, msg_count in rows
         ],
         "total": total,
     }

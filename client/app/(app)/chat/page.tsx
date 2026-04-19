@@ -17,6 +17,7 @@ import {
   Clock,
   PanelLeftClose,
   PanelLeft,
+  Search,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { apiFetch } from "@/lib/auth";
@@ -53,6 +54,7 @@ interface ConversationSummary {
   title: string;
   created_at: string;
   updated_at: string;
+  message_count: number;
 }
 
 // ── Analytics helpers ─────────────────────────────────────────────────────────
@@ -431,6 +433,8 @@ function ConversationSidebar({
   onRename,
   isOpen,
   onToggle,
+  searchQuery,
+  onSearchChange,
 }: {
   conversations: ConversationSummary[];
   activeId: string | null;
@@ -440,9 +444,12 @@ function ConversationSidebar({
   onRename: (id: string, title: string) => void;
   isOpen: boolean;
   onToggle: () => void;
+  searchQuery: string;
+  onSearchChange: (q: string) => void;
 }) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState("");
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   const startRename = (conv: ConversationSummary) => {
     setEditingId(conv.id);
@@ -481,12 +488,28 @@ function ConversationSidebar({
         </div>
       </div>
 
+      {/* Search */}
+      <div className="px-3 py-2 border-b border-border">
+        <div className="relative">
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => onSearchChange(e.target.value)}
+            placeholder="Search conversations..."
+            className="w-full pl-8 pr-3 py-1.5 text-xs bg-surface-raised border border-border rounded-md text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+          />
+        </div>
+      </div>
+
       {/* List */}
       <div className="flex-1 overflow-y-auto py-2">
         {conversations.length === 0 ? (
           <div className="px-4 py-8 text-center">
             <MessageSquare className="w-8 h-8 text-muted-foreground/40 mx-auto mb-2" />
-            <p className="text-xs text-muted-foreground">No conversations yet</p>
+            <p className="text-xs text-muted-foreground">
+              {searchQuery ? "No matching conversations" : "No conversations yet"}
+            </p>
           </div>
         ) : (
           conversations.map((conv) => (
@@ -528,13 +551,37 @@ function ConversationSidebar({
                     <X className="w-3.5 h-3.5" />
                   </button>
                 </div>
+              ) : confirmDeleteId === conv.id ? (
+                /* Delete confirmation inline */
+                <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                  <span className="text-xs text-destructive truncate flex-1">Delete this chat?</span>
+                  <button
+                    onClick={() => { onDelete(conv.id); setConfirmDeleteId(null); }}
+                    className="px-2 py-0.5 text-[11px] font-medium rounded bg-destructive text-destructive-foreground hover:opacity-90"
+                  >
+                    Yes
+                  </button>
+                  <button
+                    onClick={() => setConfirmDeleteId(null)}
+                    className="px-2 py-0.5 text-[11px] font-medium rounded border border-border text-muted-foreground hover:text-foreground"
+                  >
+                    No
+                  </button>
+                </div>
               ) : (
                 <>
                   <p className="text-xs font-medium truncate pr-12">{conv.title}</p>
-                  <p className="text-[11px] text-muted-foreground mt-0.5 flex items-center gap-1">
-                    <Clock className="w-3 h-3" />
-                    {relativeTime(conv.updated_at)}
-                  </p>
+                  <div className="flex items-center gap-2 mt-0.5">
+                    <p className="text-[11px] text-muted-foreground flex items-center gap-1">
+                      <Clock className="w-3 h-3" />
+                      {relativeTime(conv.updated_at)}
+                    </p>
+                    {conv.message_count > 0 && (
+                      <p className="text-[11px] text-muted-foreground">
+                        {conv.message_count} msg{conv.message_count !== 1 ? "s" : ""}
+                      </p>
+                    )}
+                  </div>
                   {/* Action buttons on hover */}
                   <div className="absolute right-2 top-1/2 -translate-y-1/2 hidden group-hover:flex items-center gap-0.5">
                     <button
@@ -545,7 +592,7 @@ function ConversationSidebar({
                       <Pencil className="w-3 h-3" />
                     </button>
                     <button
-                      onClick={(e) => { e.stopPropagation(); onDelete(conv.id); }}
+                      onClick={(e) => { e.stopPropagation(); setConfirmDeleteId(conv.id); }}
                       className="p-1 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
                       title="Delete"
                     >
@@ -576,11 +623,14 @@ export default function ChatPage() {
   const [activeConvId, setActiveConvId] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [loadingConv, setLoadingConv] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
 
   // ── Load conversation list on mount ──
-  const fetchConversations = useCallback(async () => {
+  const fetchConversations = useCallback(async (search = "") => {
     try {
-      const res = await apiFetch("/api/chat/conversations?limit=100");
+      const params = new URLSearchParams({ limit: "100" });
+      if (search.trim()) params.set("search", search.trim());
+      const res = await apiFetch(`/api/chat/conversations?${params}`);
       if (res.ok) {
         const data = await res.json();
         setConversations(data.conversations || []);
@@ -593,6 +643,12 @@ export default function ChatPage() {
   useEffect(() => {
     fetchConversations();
   }, [fetchConversations]);
+
+  // Debounced search
+  useEffect(() => {
+    const timer = setTimeout(() => fetchConversations(searchQuery), 300);
+    return () => clearTimeout(timer);
+  }, [searchQuery, fetchConversations]);
 
   // ── Load a conversation's messages ──
   const loadConversation = useCallback(async (convId: string) => {
@@ -707,7 +763,7 @@ export default function ChatPage() {
       }
 
       // Refresh sidebar to show new/updated conversation
-      fetchConversations();
+      fetchConversations(searchQuery);
     } catch (err: unknown) {
       const errMsg = err instanceof Error ? err.message : "Something went wrong.";
       setMessages((prev) => [
@@ -738,18 +794,23 @@ export default function ChatPage() {
         onRename={renameConversation}
         isOpen={sidebarOpen}
         onToggle={() => setSidebarOpen(false)}
+        searchQuery={searchQuery}
+        onSearchChange={setSearchQuery}
       />
 
       {/* Main chat area */}
       <div className="flex-1 flex flex-col min-w-0">
         {/* Sidebar toggle when collapsed */}
         {!sidebarOpen && (
-          <button
-            onClick={() => setSidebarOpen(true)}
-            className="absolute top-3 left-3 z-10 p-1.5 rounded-md bg-surface border border-border text-muted-foreground hover:text-foreground transition-colors"
-          >
-            <PanelLeft className="w-4 h-4" />
-          </button>
+          <div className="px-3 py-2 border-b border-border">
+            <button
+              onClick={() => setSidebarOpen(true)}
+              className="p-1.5 rounded-md bg-surface border border-border text-muted-foreground hover:text-foreground transition-colors"
+              title="Open sidebar"
+            >
+              <PanelLeft className="w-4 h-4" />
+            </button>
+          </div>
         )}
 
         {/* Messages */}
