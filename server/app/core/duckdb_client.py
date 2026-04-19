@@ -91,7 +91,7 @@ async def sample_file(
 
             return {
                 "columns_info": columns_info,
-                "sample_rows": _json_safe(df.fillna("").to_dict("records")),
+                "sample_rows": _json_safe(df.astype(object).fillna("").to_dict("records")),
                 "row_count": len(df),
                 "row_count_approx": len(df) == 500,
                 "column_names": list(df.columns),
