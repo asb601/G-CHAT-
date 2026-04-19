@@ -731,7 +731,7 @@ export default function ChatPage() {
     setExpandedMsgId(null);
 
     try {
-      const res = await apiFetch("/api/chat/message", {
+      const res = await apiFetch("/api/chat/message/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -745,24 +745,83 @@ export default function ChatPage() {
         throw new Error(err.detail ?? `HTTP ${res.status}`);
       }
 
-      const data: AssistantPayload & { conversation_id?: string } = await res.json();
-      const newMsgId = crypto.randomUUID();
+      // Parse SSE stream
+      const reader = res.body?.getReader();
+      if (!reader) throw new Error("No response stream");
 
-      // Track the conversation ID from server
-      if (data.conversation_id && !activeConvId) {
-        setActiveConvId(data.conversation_id);
+      const decoder = new TextDecoder();
+      let streamedContent = "";
+      let streamMsgId: string | null = null;
+      let finalResult: (AssistantPayload & { conversation_id?: string; warning?: string }) | null = null;
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || ""; // keep incomplete line in buffer
+
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const event = JSON.parse(line.slice(6));
+
+            if (event.event === "started" && event.conversation_id) {
+              if (!activeConvId || activeConvId !== event.conversation_id) {
+                setActiveConvId(event.conversation_id);
+              }
+            } else if (event.event === "token") {
+              streamedContent += event.content;
+              if (!streamMsgId) {
+                streamMsgId = crypto.randomUUID();
+                setMessages((prev) => [
+                  ...prev,
+                  { id: streamMsgId!, role: "assistant", content: streamedContent },
+                ]);
+              } else {
+                const currentContent = streamedContent;
+                const currentId = streamMsgId;
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === currentId ? { ...m, content: currentContent } : m
+                  )
+                );
+              }
+            } else if (event.event === "done") {
+              finalResult = event.result;
+              if (streamMsgId && finalResult) {
+                const fResult = finalResult;
+                const sId = streamMsgId;
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === sId
+                      ? { ...m, content: fResult.answer, payload: fResult }
+                      : m
+                  )
+                );
+                if (fResult.data && fResult.data.length > 0) {
+                  setExpandedMsgId(sId);
+                }
+              }
+              if (finalResult?.warning) {
+                const warnMsg = finalResult.warning;
+                setMessages((prev) => [
+                  ...prev,
+                  { id: crypto.randomUUID(), role: "assistant", content: warnMsg },
+                ]);
+              }
+            } else if (event.event === "error") {
+              throw new Error(event.detail || "Stream error");
+            }
+          } catch (parseErr) {
+            if (parseErr instanceof Error && parseErr.message.includes("Stream error")) throw parseErr;
+          }
+        }
       }
 
-      setMessages((prev) => [
-        ...prev,
-        { id: newMsgId, role: "assistant", content: data.answer, payload: data },
-      ]);
-
-      if (data.data && data.data.length > 0) {
-        setExpandedMsgId(newMsgId);
-      }
-
-      // Refresh sidebar to show new/updated conversation
+      // Refresh sidebar
       fetchConversations(searchQuery);
     } catch (err: unknown) {
       const errMsg = err instanceof Error ? err.message : "Something went wrong.";

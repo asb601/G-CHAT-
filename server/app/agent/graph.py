@@ -120,10 +120,13 @@ def _build_graph(all_tools: list) -> Any:
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
-async def run_agent_query(query: str, db: AsyncSession) -> dict:
+async def run_agent_query(query: str, db: AsyncSession, *, conversation_context: str = "") -> dict:
     """
     Main entry point for the agentic query pipeline.
     Returns {answer, data, chart, route, row_count, files_used, tool_calls}.
+
+    conversation_context: optional formatted string with rolling summary +
+    recent messages from the conversation, injected into the system prompt.
     """
     pipeline_start = time.perf_counter()
 
@@ -264,6 +267,17 @@ async def run_agent_query(query: str, db: AsyncSession) -> dict:
         parquet_note=parquet_note,
         sample_note=sample_note,
     )
+
+    # ── Inject conversation context for multi-turn awareness ──
+    if conversation_context:
+        system_prompt += (
+            "\n\n--- CONVERSATION HISTORY ---\n"
+            "The user is continuing a conversation. Use this context to understand "
+            "follow-up questions, pronouns ('it', 'that', 'those'), and references "
+            "to previous queries or results.\n\n"
+            f"{conversation_context}\n"
+            "---\n"
+        )
 
     initial_state: AgentState = {
         "messages": [
