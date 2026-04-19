@@ -32,11 +32,7 @@ jobs:
             ${{ secrets.SERVER_ENV }}
             ENVEOF
 
-            # Run DB migrations (safe no-op if columns already exist)
-            cd ~/G-CHAT-/server
-            uv run python -m app.migrations.chat_memory_upgrade
-
-            # Restart backend service
+            # Restart backend service (creates all tables on first start)
             sudo systemctl restart gchat
 
             # Wait for uvicorn to fully start, then verify
@@ -45,8 +41,13 @@ jobs:
               STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/api/health)
               if [ "$STATUS" = "200" ]; then
                 echo " Backend OK"
-                exit 0
+                break
               fi
               echo "Waiting... attempt $i (status: $STATUS)"
+              if [ "$i" = "10" ]; then echo "Backend did not become healthy" && exit 1; fi
             done
-            echo "Backend did not become healthy" && exit 1
+
+            # Run DB migrations after service is up (safe no-op if columns already exist)
+            cd ~/G-CHAT-/server
+            uv run python -m app.migrations.chat_memory_upgrade
+            echo "Migrations complete"
