@@ -2,10 +2,12 @@ import asyncio
 import uuid
 
 import structlog
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+from datetime import datetime, timezone
 
 from app.core.database import async_session, get_db
 from app.core.logger import chat_logger, ingest_logger
@@ -13,6 +15,7 @@ from app.core.security import get_current_user, require_admin
 from app.models.file import File
 from app.models.file_metadata import FileMetadata
 from app.models.user import User
+from app.models.conversation import Conversation, Message
 from app.agent import run_agent_query
 from app.services.ingestion_service import ingest_file
 
@@ -24,13 +27,19 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 
 class ChatMessageRequest(BaseModel):
     query: str
+    conversation_id: str | None = None  # omit to start a new conversation
 
 
 class IngestRequest(BaseModel):
     file_ids: list[str]
 
 
+class ConversationRenameRequest(BaseModel):
+    title: str
+
+
 # ── POST /api/chat/message ──
+# Creates or continues a conversation. Persists user & assistant messages.
 
 
 @router.post("/message")
@@ -49,23 +58,192 @@ async def chat_message(
     structlog.contextvars.clear_contextvars()
     structlog.contextvars.bind_contextvars(trace_id=trace_id, pipeline="chat")
 
-    chat_logger.info("chain_start", user_id=user.id, query=query[:200])
+    # ── Resolve or create conversation ──
+    if body.conversation_id:
+        conv = await db.get(Conversation, body.conversation_id)
+        if not conv or conv.user_id != user.id:
+            raise HTTPException(status_code=404, detail="Conversation not found.")
+    else:
+        conv = Conversation(
+            user_id=user.id,
+            title=query[:100].strip(),
+        )
+        db.add(conv)
+        await db.flush()  # get conv.id
+
+    # ── Determine next message position ──
+    pos_result = await db.execute(
+        select(func.coalesce(func.max(Message.position), -1))
+        .where(Message.conversation_id == conv.id)
+    )
+    next_pos = pos_result.scalar() + 1
+
+    # ── Save user message ──
+    user_msg = Message(
+        conversation_id=conv.id,
+        role="user",
+        content=query,
+        position=next_pos,
+    )
+    db.add(user_msg)
+
+    chat_logger.info("chain_start", user_id=user.id, conversation_id=conv.id, query=query[:200])
 
     try:
-        intent = "agent"
-        chat_logger.info("query_routed", intent=intent, query=query[:200])
-
         result = await run_agent_query(query, db)
 
+        # ── Save assistant message ──
+        assistant_msg = Message(
+            conversation_id=conv.id,
+            role="assistant",
+            content=result.get("answer", ""),
+            position=next_pos + 1,
+            payload={
+                "data": result.get("data", []),
+                "chart": result.get("chart"),
+                "row_count": result.get("row_count", 0),
+                "files_used": result.get("files_used", []),
+                "tool_calls": result.get("tool_calls", 0),
+            },
+        )
+        db.add(assistant_msg)
+
+        # Touch updated_at
+        conv.updated_at = datetime.now(timezone.utc)
+        await db.commit()
+
         chat_logger.info("chain_end", outcome="success",
-                         route=result.get("route", intent),
+                         conversation_id=conv.id,
+                         route=result.get("route", "agent"),
                          rows=result.get("row_count", 0))
+
+        result["conversation_id"] = conv.id
         return result
+
     except Exception as exc:
+        await db.rollback()
         chat_logger.exception("chain_end", outcome="error", error=str(exc)[:500])
         raise HTTPException(status_code=500, detail="Failed to process query. Please try again.")
     finally:
         structlog.contextvars.clear_contextvars()
+
+
+# ── GET /api/chat/conversations ──
+# List user's conversations, newest first, paginated.
+
+
+@router.get("/conversations")
+async def list_conversations(
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    q = (
+        select(Conversation)
+        .where(Conversation.user_id == user.id, Conversation.archived_at.is_(None))
+        .order_by(Conversation.updated_at.desc())
+        .offset(offset)
+        .limit(limit)
+    )
+    rows = list((await db.execute(q)).scalars().all())
+
+    count_q = select(func.count(Conversation.id)).where(
+        Conversation.user_id == user.id, Conversation.archived_at.is_(None)
+    )
+    total = (await db.execute(count_q)).scalar()
+
+    return {
+        "conversations": [
+            {
+                "id": c.id,
+                "title": c.title,
+                "created_at": c.created_at.isoformat(),
+                "updated_at": c.updated_at.isoformat(),
+            }
+            for c in rows
+        ],
+        "total": total,
+    }
+
+
+# ── GET /api/chat/conversations/{conversation_id} ──
+# Full conversation with all messages (for loading a past chat).
+
+
+@router.get("/conversations/{conversation_id}")
+async def get_conversation(
+    conversation_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    q = (
+        select(Conversation)
+        .where(Conversation.id == conversation_id)
+        .options(selectinload(Conversation.messages))
+    )
+    conv = (await db.execute(q)).scalar_one_or_none()
+    if not conv or conv.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+
+    return {
+        "id": conv.id,
+        "title": conv.title,
+        "created_at": conv.created_at.isoformat(),
+        "updated_at": conv.updated_at.isoformat(),
+        "messages": [
+            {
+                "id": m.id,
+                "role": m.role,
+                "content": m.content,
+                "payload": m.payload,
+                "created_at": m.created_at.isoformat(),
+            }
+            for m in sorted(conv.messages, key=lambda m: m.position)
+        ],
+    }
+
+
+# ── PATCH /api/chat/conversations/{conversation_id} ──
+# Rename a conversation.
+
+
+@router.patch("/conversations/{conversation_id}")
+async def rename_conversation(
+    conversation_id: str,
+    body: ConversationRenameRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    conv = await db.get(Conversation, conversation_id)
+    if not conv or conv.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+
+    title = body.title.strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="Title cannot be empty.")
+    conv.title = title[:200]
+    await db.commit()
+    return {"id": conv.id, "title": conv.title}
+
+
+# ── DELETE /api/chat/conversations/{conversation_id} ──
+# Soft-delete (archive) a conversation.
+
+
+@router.delete("/conversations/{conversation_id}")
+async def delete_conversation(
+    conversation_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    conv = await db.get(Conversation, conversation_id)
+    if not conv or conv.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+
+    conv.archived_at = datetime.now(timezone.utc)
+    await db.commit()
+    return {"deleted": True}
 
 
 # ── POST /api/chat/ingest ──

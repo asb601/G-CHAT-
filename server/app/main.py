@@ -23,6 +23,7 @@ import app.models.file_metadata  # ensure FileMetadata table is created
 import app.models.file_relationship  # ensure FileRelationship table is created
 import app.models.file_analytics  # ensure FileAnalytics table is created
 import app.models.background_job  # ensure BackgroundJob table is created
+import app.models.conversation  # ensure Conversation + Message tables are created
 
 
 async def _add_column_if_missing(conn, table: str, column: str, col_type: str) -> None:

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import {
   Send,
   AlertCircle,
@@ -8,6 +8,15 @@ import {
   ChevronDown,
   BarChart2,
   Table2,
+  Plus,
+  MessageSquare,
+  Trash2,
+  Pencil,
+  Check,
+  X,
+  Clock,
+  PanelLeftClose,
+  PanelLeft,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { apiFetch } from "@/lib/auth";
@@ -37,6 +46,13 @@ interface Message {
   content: string;
   payload?: AssistantPayload;
   error?: boolean;
+}
+
+interface ConversationSummary {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
 }
 
 // ── Analytics helpers ─────────────────────────────────────────────────────────
@@ -390,6 +406,162 @@ function AssistantMessage({
   );
 }
 
+// ── Relative time ─────────────────────────────────────────────────────────────
+
+function relativeTime(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return "Just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d ago`;
+  return new Date(iso).toLocaleDateString();
+}
+
+// ── Conversation sidebar ──────────────────────────────────────────────────────
+
+function ConversationSidebar({
+  conversations,
+  activeId,
+  onSelect,
+  onNew,
+  onDelete,
+  onRename,
+  isOpen,
+  onToggle,
+}: {
+  conversations: ConversationSummary[];
+  activeId: string | null;
+  onSelect: (id: string) => void;
+  onNew: () => void;
+  onDelete: (id: string) => void;
+  onRename: (id: string, title: string) => void;
+  isOpen: boolean;
+  onToggle: () => void;
+}) {
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editTitle, setEditTitle] = useState("");
+
+  const startRename = (conv: ConversationSummary) => {
+    setEditingId(conv.id);
+    setEditTitle(conv.title);
+  };
+
+  const commitRename = () => {
+    if (editingId && editTitle.trim()) {
+      onRename(editingId, editTitle.trim());
+    }
+    setEditingId(null);
+  };
+
+  if (!isOpen) return null;
+
+  return (
+    <div className="w-[260px] shrink-0 border-r border-border bg-surface flex flex-col h-full">
+      {/* Header */}
+      <div className="px-3 py-3 border-b border-border flex items-center justify-between">
+        <h2 className="text-sm font-semibold text-foreground">Conversations</h2>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={onNew}
+            className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-surface-raised transition-colors"
+            title="New chat"
+          >
+            <Plus className="w-4 h-4" />
+          </button>
+          <button
+            onClick={onToggle}
+            className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-surface-raised transition-colors"
+            title="Close sidebar"
+          >
+            <PanelLeftClose className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+
+      {/* List */}
+      <div className="flex-1 overflow-y-auto py-2">
+        {conversations.length === 0 ? (
+          <div className="px-4 py-8 text-center">
+            <MessageSquare className="w-8 h-8 text-muted-foreground/40 mx-auto mb-2" />
+            <p className="text-xs text-muted-foreground">No conversations yet</p>
+          </div>
+        ) : (
+          conversations.map((conv) => (
+            <div
+              key={conv.id}
+              className={cn(
+                "group relative px-3 py-2.5 mx-2 rounded-lg cursor-pointer transition-colors",
+                activeId === conv.id
+                  ? "bg-primary/10 text-foreground"
+                  : "text-muted-foreground hover:bg-surface-raised hover:text-foreground"
+              )}
+              onClick={() => {
+                if (editingId !== conv.id) onSelect(conv.id);
+              }}
+            >
+              {editingId === conv.id ? (
+                <div className="flex items-center gap-1">
+                  <input
+                    autoFocus
+                    value={editTitle}
+                    onChange={(e) => setEditTitle(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") commitRename();
+                      if (e.key === "Escape") setEditingId(null);
+                    }}
+                    className="flex-1 text-xs bg-surface border border-border rounded px-2 py-1 text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                    onClick={(e) => e.stopPropagation()}
+                  />
+                  <button
+                    onClick={(e) => { e.stopPropagation(); commitRename(); }}
+                    className="p-0.5 rounded text-green-500 hover:bg-green-500/10"
+                  >
+                    <Check className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setEditingId(null); }}
+                    className="p-0.5 rounded text-muted-foreground hover:bg-surface-raised"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <p className="text-xs font-medium truncate pr-12">{conv.title}</p>
+                  <p className="text-[11px] text-muted-foreground mt-0.5 flex items-center gap-1">
+                    <Clock className="w-3 h-3" />
+                    {relativeTime(conv.updated_at)}
+                  </p>
+                  {/* Action buttons on hover */}
+                  <div className="absolute right-2 top-1/2 -translate-y-1/2 hidden group-hover:flex items-center gap-0.5">
+                    <button
+                      onClick={(e) => { e.stopPropagation(); startRename(conv); }}
+                      className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-surface transition-colors"
+                      title="Rename"
+                    >
+                      <Pencil className="w-3 h-3" />
+                    </button>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); onDelete(conv.id); }}
+                      className="p-1 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
+                      title="Delete"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── Page ───────────────────────────────────────────────────────────────────────
 
 export default function ChatPage() {
@@ -398,6 +570,94 @@ export default function ChatPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [expandedMsgId, setExpandedMsgId] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Conversation state
+  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const [activeConvId, setActiveConvId] = useState<string | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [loadingConv, setLoadingConv] = useState(false);
+
+  // ── Load conversation list on mount ──
+  const fetchConversations = useCallback(async () => {
+    try {
+      const res = await apiFetch("/api/chat/conversations?limit=100");
+      if (res.ok) {
+        const data = await res.json();
+        setConversations(data.conversations || []);
+      }
+    } catch {
+      // silent — sidebar just won't load
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchConversations();
+  }, [fetchConversations]);
+
+  // ── Load a conversation's messages ──
+  const loadConversation = useCallback(async (convId: string) => {
+    setLoadingConv(true);
+    setActiveConvId(convId);
+    setMessages([]);
+    setExpandedMsgId(null);
+
+    try {
+      const res = await apiFetch(`/api/chat/conversations/${convId}`);
+      if (!res.ok) return;
+      const data = await res.json();
+
+      const loaded: Message[] = (data.messages || []).map(
+        (m: { id: string; role: string; content: string; payload?: AssistantPayload }) => ({
+          id: m.id,
+          role: m.role as "user" | "assistant",
+          content: m.content,
+          payload: m.role === "assistant" ? m.payload : undefined,
+        })
+      );
+      setMessages(loaded);
+    } catch {
+      // silent
+    } finally {
+      setLoadingConv(false);
+    }
+  }, []);
+
+  // ── Start new conversation ──
+  const startNewChat = useCallback(() => {
+    setActiveConvId(null);
+    setMessages([]);
+    setExpandedMsgId(null);
+    setInput("");
+  }, []);
+
+  // ── Delete conversation ──
+  const deleteConversation = useCallback(async (convId: string) => {
+    try {
+      await apiFetch(`/api/chat/conversations/${convId}`, { method: "DELETE" });
+      setConversations((prev) => prev.filter((c) => c.id !== convId));
+      if (activeConvId === convId) {
+        startNewChat();
+      }
+    } catch {
+      // silent
+    }
+  }, [activeConvId, startNewChat]);
+
+  // ── Rename conversation ──
+  const renameConversation = useCallback(async (convId: string, title: string) => {
+    try {
+      await apiFetch(`/api/chat/conversations/${convId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title }),
+      });
+      setConversations((prev) =>
+        prev.map((c) => (c.id === convId ? { ...c, title } : c))
+      );
+    } catch {
+      // silent
+    }
+  }, []);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -412,13 +672,16 @@ export default function ChatPage() {
     setMessages((prev) => [...prev, userMsg]);
     setInput("");
     setIsLoading(true);
-    setExpandedMsgId(null); // collapse all previous on new question
+    setExpandedMsgId(null);
 
     try {
       const res = await apiFetch("/api/chat/message", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: trimmed }),
+        body: JSON.stringify({
+          query: trimmed,
+          conversation_id: activeConvId,
+        }),
       });
 
       if (!res.ok) {
@@ -426,18 +689,25 @@ export default function ChatPage() {
         throw new Error(err.detail ?? `HTTP ${res.status}`);
       }
 
-      const data: AssistantPayload = await res.json();
+      const data: AssistantPayload & { conversation_id?: string } = await res.json();
       const newMsgId = crypto.randomUUID();
+
+      // Track the conversation ID from server
+      if (data.conversation_id && !activeConvId) {
+        setActiveConvId(data.conversation_id);
+      }
 
       setMessages((prev) => [
         ...prev,
         { id: newMsgId, role: "assistant", content: data.answer, payload: data },
       ]);
 
-      // Auto-open accordion when data is present
       if (data.data && data.data.length > 0) {
         setExpandedMsgId(newMsgId);
       }
+
+      // Refresh sidebar to show new/updated conversation
+      fetchConversations();
     } catch (err: unknown) {
       const errMsg = err instanceof Error ? err.message : "Something went wrong.";
       setMessages((prev) => [
@@ -457,82 +727,111 @@ export default function ChatPage() {
   };
 
   return (
-    <div className="flex flex-col h-full">
-      {/* Messages */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto">
-        {messages.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full px-4 text-center">
-            <div className="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center mb-4">
-              <Send className="w-5 h-5 text-primary" />
+    <div className="flex h-full">
+      {/* Conversation sidebar */}
+      <ConversationSidebar
+        conversations={conversations}
+        activeId={activeConvId}
+        onSelect={loadConversation}
+        onNew={startNewChat}
+        onDelete={deleteConversation}
+        onRename={renameConversation}
+        isOpen={sidebarOpen}
+        onToggle={() => setSidebarOpen(false)}
+      />
+
+      {/* Main chat area */}
+      <div className="flex-1 flex flex-col min-w-0">
+        {/* Sidebar toggle when collapsed */}
+        {!sidebarOpen && (
+          <button
+            onClick={() => setSidebarOpen(true)}
+            className="absolute top-3 left-3 z-10 p-1.5 rounded-md bg-surface border border-border text-muted-foreground hover:text-foreground transition-colors"
+          >
+            <PanelLeft className="w-4 h-4" />
+          </button>
+        )}
+
+        {/* Messages */}
+        <div ref={scrollRef} className="flex-1 overflow-y-auto">
+          {loadingConv ? (
+            <div className="flex items-center justify-center h-full">
+              <RefreshCw className="w-5 h-5 text-muted-foreground animate-spin" />
             </div>
-            <h2 className="text-lg font-semibold text-foreground mb-1">Start a conversation</h2>
-            <p className="text-sm text-muted-foreground max-w-sm">
-              Ask anything about your data. The AI will search, query, and analyse it for you.
-            </p>
-          </div>
-        ) : (
-          <div className="max-w-3xl mx-auto px-4 py-6 space-y-6">
-            {messages.map((msg) => (
-              <div
-                key={msg.id}
-                className={cn(
-                  "flex gap-3",
-                  msg.role === "user" ? "justify-end" : "justify-start"
-                )}
-              >
-                {msg.role === "user" ? (
-                  <div className="max-w-[80%] rounded-xl px-4 py-3 text-sm leading-relaxed bg-primary text-primary-foreground">
-                    {msg.content}
-                  </div>
-                ) : (
-                  <AssistantMessage
-                    msg={msg}
-                    isExpanded={expandedMsgId === msg.id}
-                    onToggle={() =>
-                      setExpandedMsgId((prev) => (prev === msg.id ? null : msg.id))
-                    }
-                  />
-                )}
+          ) : messages.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-full px-4 text-center">
+              <div className="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center mb-4">
+                <Send className="w-5 h-5 text-primary" />
               </div>
-            ))}
-            {isLoading && (
-              <div className="flex justify-start">
-                <div className="bg-surface border border-border rounded-xl px-4 py-3">
-                  <div className="flex gap-1.5 items-center">
-                    <span className="w-2 h-2 rounded-full bg-muted-foreground animate-pulse" />
-                    <span className="w-2 h-2 rounded-full bg-muted-foreground animate-pulse [animation-delay:150ms]" />
-                    <span className="w-2 h-2 rounded-full bg-muted-foreground animate-pulse [animation-delay:300ms]" />
+              <h2 className="text-lg font-semibold text-foreground mb-1">Start a conversation</h2>
+              <p className="text-sm text-muted-foreground max-w-sm">
+                Ask anything about your data. The AI will search, query, and analyse it for you.
+              </p>
+            </div>
+          ) : (
+            <div className="max-w-3xl mx-auto px-4 py-6 space-y-6">
+              {messages.map((msg) => (
+                <div
+                  key={msg.id}
+                  className={cn(
+                    "flex gap-3",
+                    msg.role === "user" ? "justify-end" : "justify-start"
+                  )}
+                >
+                  {msg.role === "user" ? (
+                    <div className="max-w-[80%] rounded-xl px-4 py-3 text-sm leading-relaxed bg-primary text-primary-foreground">
+                      {msg.content}
+                    </div>
+                  ) : (
+                    <AssistantMessage
+                      msg={msg}
+                      isExpanded={expandedMsgId === msg.id}
+                      onToggle={() =>
+                        setExpandedMsgId((prev) => (prev === msg.id ? null : msg.id))
+                      }
+                    />
+                  )}
+                </div>
+              ))}
+              {isLoading && (
+                <div className="flex justify-start">
+                  <div className="bg-surface border border-border rounded-xl px-4 py-3">
+                    <div className="flex gap-1.5 items-center">
+                      <span className="w-2 h-2 rounded-full bg-muted-foreground animate-pulse" />
+                      <span className="w-2 h-2 rounded-full bg-muted-foreground animate-pulse [animation-delay:150ms]" />
+                      <span className="w-2 h-2 rounded-full bg-muted-foreground animate-pulse [animation-delay:300ms]" />
+                    </div>
                   </div>
                 </div>
-              </div>
-            )}
-          </div>
-        )}
-      </div>
+              )}
+            </div>
+          )}
+        </div>
 
-      {/* Input */}
-      <div className="border-t border-border bg-surface p-4">
-        <form onSubmit={handleSubmit} className="max-w-3xl mx-auto flex items-end gap-2">
-          <textarea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="Ask a question about your data..."
-            rows={1}
-            className="flex-1 resize-none bg-surface-raised border border-border rounded-lg px-4 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary"
-          />
-          <button
-            type="submit"
-            disabled={!input.trim() || isLoading}
-            className="shrink-0 h-10 w-10 flex items-center justify-center rounded-lg bg-primary text-primary-foreground disabled:opacity-40 transition-opacity hover:opacity-90"
-          >
-            {isLoading ? (
-              <RefreshCw className="w-4 h-4 animate-spin" />
-            ) : (
-              <Send className="w-4 h-4" />
-            )}
-          </button>
-        </form>
+        {/* Input */}
+        <div className="border-t border-border bg-surface p-4">
+          <form onSubmit={handleSubmit} className="max-w-3xl mx-auto flex items-end gap-2">
+            <textarea
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder="Ask a question about your data..."
+              rows={1}
+              className="flex-1 resize-none bg-surface-raised border border-border rounded-lg px-4 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary"
+            />
+            <button
+              type="submit"
+              disabled={!input.trim() || isLoading}
+              className="shrink-0 h-10 w-10 flex items-center justify-center rounded-lg bg-primary text-primary-foreground disabled:opacity-40 transition-opacity hover:opacity-90"
+            >
+              {isLoading ? (
+                <RefreshCw className="w-4 h-4 animate-spin" />
+              ) : (
+                <Send className="w-4 h-4" />
+              )}
+            </button>
+          </form>
+        </div>
       </div>
     </div>
   );
