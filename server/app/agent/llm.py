@@ -31,7 +31,7 @@ def get_llm() -> AzureChatOpenAI:
                     azure_deployment=deployment,
                     api_version=api_version,
                     temperature=0,
-                    max_tokens=1500,
+                    max_completion_tokens=1500,
                     timeout=60,
                     max_retries=2,
                 )

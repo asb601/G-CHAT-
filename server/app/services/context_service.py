@@ -233,7 +233,7 @@ async def _call_llm_simple(llm, prompt: str, max_tokens: int) -> str:
     import asyncio
     from langchain_core.messages import HumanMessage as LCHumanMessage
 
-    # Use a low-cost call with reduced max_tokens
-    bound = llm.bind(max_tokens=max_tokens, temperature=0.3)
+    # Use a low-cost call with reduced token budget
+    bound = llm.bind(max_completion_tokens=max_tokens, temperature=0.3)
     response = await asyncio.to_thread(bound.invoke, [LCHumanMessage(content=prompt)])
     return response.content if isinstance(response.content, str) else str(response.content)
