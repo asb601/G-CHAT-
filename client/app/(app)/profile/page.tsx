@@ -2,7 +2,7 @@
 
 import { useState, useCallback } from "react";
 import useSWR from "swr";
-import { UserCircle, Users, Shield, ShieldOff, Loader2 } from "lucide-react";
+import { UserCircle, Users, Shield, ShieldOff, Loader2, Database, RefreshCw, CheckCircle2, AlertTriangle } from "lucide-react";
 import { useAuth } from "@/components/auth-provider";
 import { apiFetch } from "@/lib/auth";
 import { cn } from "@/lib/utils";
@@ -29,7 +29,7 @@ const usersFetcher = async (): Promise<UserItem[]> => {
 
 /* ── tabs ────────────────────────────────────────────────────────────────── */
 
-type Tab = "profile" | "users";
+type Tab = "profile" | "users" | "parquet";
 
 /* ── page ────────────────────────────────────────────────────────────────── */
 
@@ -42,6 +42,7 @@ export default function ProfilePage() {
   const tabs: { id: Tab; label: string; icon: typeof UserCircle; adminOnly?: boolean }[] = [
     { id: "profile", label: "Profile", icon: UserCircle },
     { id: "users", label: "Users", icon: Users, adminOnly: true },
+    { id: "parquet", label: "Parquet Status", icon: Database, adminOnly: true },
   ];
 
   const visibleTabs = tabs.filter((t) => !t.adminOnly || user.is_admin);
@@ -79,6 +80,7 @@ export default function ProfilePage() {
       <div className="flex-1 overflow-y-auto p-6">
         {tab === "profile" && <ProfileTab />}
         {tab === "users" && user.is_admin && <UsersTab currentUserId={user.id} />}
+        {tab === "parquet" && user.is_admin && <ParquetTab />}
       </div>
     </div>
   );

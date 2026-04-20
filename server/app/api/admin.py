@@ -108,3 +108,111 @@ async def reingest_all(
     asyncio.create_task(_batch_reingest(file_ids))
 
     return {"message": "Re-ingestion started", "file_count": len(file_ids)}
+
+
+# ── Retry failed parquet conversions ─────────────────────────────────────────
+
+@router.get("/missing-parquet")
+async def list_missing_parquet(
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """List files that have been ingested but are missing parquet conversion."""
+    from app.models.container import ContainerConfig
+
+    result = await db.execute(
+        select(FileMetadata, FileAnalytics)
+        .outerjoin(FileAnalytics, FileMetadata.file_id == FileAnalytics.file_id)
+        .where(
+            (FileAnalytics.parquet_blob_path == None)  # noqa: E711
+            | (FileAnalytics.id == None)  # noqa: E711
+        )
+    )
+    rows = result.all()
+
+    files = []
+    for meta, analytics in rows:
+        f = await db.get(File, meta.file_id)
+        files.append({
+            "file_id": meta.file_id,
+            "name": f.name if f else meta.blob_path,
+            "blob_path": meta.blob_path,
+            "has_analytics": analytics is not None,
+        })
+
+    return {"files": files, "count": len(files)}
+
+
+_PARQUET_SEMAPHORE = asyncio.Semaphore(2)
+
+
+async def _batch_parquet_convert(file_entries: list[dict]) -> None:
+    """Convert CSV files to parquet with concurrency capped at 2."""
+    from app.services.analytics_service import trigger_parquet_conversion
+
+    done = 0
+    failed = 0
+
+    async def _one(entry: dict) -> None:
+        nonlocal done, failed
+        async with _PARQUET_SEMAPHORE:
+            try:
+                await trigger_parquet_conversion(
+                    file_id=entry["file_id"],
+                    blob_path=entry["blob_path"],
+                    connection_string=entry["connection_string"],
+                    container_name=entry["container_name"],
+                )
+                done += 1
+                ingest_logger.info("parquet_retry_progress", done=done, failed=failed,
+                                   file=entry["blob_path"])
+            except Exception as exc:
+                failed += 1
+                ingest_logger.exception("parquet_retry_failed",
+                                        file=entry["blob_path"], error=str(exc)[:300])
+
+    await asyncio.gather(*[_one(e) for e in file_entries])
+    invalidate_catalog_cache()
+    ingest_logger.info("parquet_retry_complete", done=done, failed=failed)
+
+
+@router.post("/retry-parquet")
+async def retry_parquet(
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Re-trigger parquet conversion for all files missing it."""
+    from app.models.container import ContainerConfig
+
+    result = await db.execute(
+        select(FileMetadata, FileAnalytics)
+        .outerjoin(FileAnalytics, FileMetadata.file_id == FileAnalytics.file_id)
+        .where(
+            (FileAnalytics.parquet_blob_path == None)  # noqa: E711
+            | (FileAnalytics.id == None)  # noqa: E711
+        )
+    )
+    rows = result.all()
+
+    if not rows:
+        return {"message": "All files already have parquet", "count": 0}
+
+    entries = []
+    for meta, analytics in rows:
+        container = await db.get(ContainerConfig, meta.container_id)
+        if not container:
+            continue
+        entries.append({
+            "file_id": meta.file_id,
+            "blob_path": meta.blob_path,
+            "connection_string": container.connection_string,
+            "container_name": container.container_name,
+        })
+
+    if not entries:
+        return {"message": "No convertible files found", "count": 0}
+
+    ingest_logger.info("parquet_retry_started", admin_id=admin.id, file_count=len(entries))
+    asyncio.create_task(_batch_parquet_convert(entries))
+
+    return {"message": "Parquet conversion started", "count": len(entries)}

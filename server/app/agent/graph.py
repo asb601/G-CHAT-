@@ -351,26 +351,6 @@ async def _build_agent_context(
             + "\n".join(lines)
             + "\nParquet covers the FULL dataset. Use it for any ordering, filtering, counting, or row retrieval."
         )
-
-        # Also list CSV-only files (no parquet conversion)
-        csv_only = [e for e in catalog if e.get("blob_path") and e["blob_path"] not in parquet_paths_all]
-        if csv_only:
-            csv_lines = []
-            for entry in csv_only:
-                bp = entry["blob_path"]
-                csv_line = f"  read_csv_auto('az://{container_name}/{bp}', sample_size=500, null_padding=true, ignore_errors=true)"
-                cols_info = entry.get("columns_info") or []
-                if cols_info:
-                    col_names = [c["name"] for c in cols_info]
-                    csv_line += f"\n    Columns: {', '.join(col_names)}"
-                desc = entry.get("ai_description")
-                if desc:
-                    csv_line += f"\n    Description: {desc}"
-                csv_lines.append(csv_line)
-            parquet_note += (
-                "\n\nCSV-only files (no parquet — may be slower for large files):\n"
-                + "\n".join(csv_lines)
-            )
     elif parquet_blob_path:
         parquet_note = (
             f"Parquet path (use directly in run_sql — no search_catalog needed):\n"
