@@ -247,3 +247,88 @@ function UsersTab({ currentUserId }: { currentUserId: string }) {
     </div>
   );
 }
+
+/* ── Parquet status tab (admin only) ─────────────────────────────────────── */
+
+interface MissingFile {
+  file_id: string;
+  name: string;
+  blob_path: string;
+  has_analytics: boolean;
+}
+
+function ParquetTab() {
+  const { data, error, isLoading, mutate } = useSWR<{ files: MissingFile[]; count: number }>(
+    "/api/admin/missing-parquet",
+    (url: string) => apiFetch(url).then((r) => r.json()),
+  );
+  const [retrying, setRetrying] = useState(false);
+  const [result, setResult] = useState<string | null>(null);
+
+  const retryAll = useCallback(async () => {
+    setRetrying(true);
+    setResult(null);
+    try {
+      const res = await apiFetch("/api/admin/retry-parquet", { method: "POST" });
+      const body = await res.json();
+      setResult(body.message + ` (${body.count} files)`);
+      setTimeout(() => mutate(), 5000);
+    } catch {
+      setResult("Failed to start retry");
+    } finally {
+      setRetrying(false);
+    }
+  }, [mutate]);
+
+  if (isLoading) return <div className="flex justify-center py-12"><Loader2 className="w-6 h-6 animate-spin text-zinc-400" /></div>;
+  if (error) return <p className="text-red-400 p-4">Failed to load parquet status.</p>;
+
+  const files = data?.files ?? [];
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h3 className="text-lg font-semibold text-zinc-100">Missing Parquet Conversions</h3>
+          <p className="text-sm text-zinc-400">{files.length} file(s) without parquet</p>
+        </div>
+        {files.length > 0 && (
+          <button
+            onClick={retryAll}
+            disabled={retrying}
+            className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded-lg text-sm font-medium transition-colors"
+          >
+            {retrying ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+            Retry All
+          </button>
+        )}
+      </div>
+
+      {result && (
+        <div className="flex items-center gap-2 p-3 bg-blue-500/10 border border-blue-500/20 rounded-lg text-sm text-blue-300">
+          <CheckCircle2 className="w-4 h-4 shrink-0" />
+          {result}
+        </div>
+      )}
+
+      {files.length === 0 ? (
+        <div className="flex flex-col items-center py-12 text-zinc-400">
+          <CheckCircle2 className="w-8 h-8 mb-2 text-green-400" />
+          <p>All files have parquet conversions.</p>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {files.map((f) => (
+            <div key={f.file_id} className="flex items-center justify-between p-3 bg-zinc-800/50 rounded-lg border border-zinc-700/50">
+              <div className="min-w-0">
+                <p className="text-sm font-medium text-zinc-200 truncate">{f.name}</p>
+                <p className="text-xs text-zinc-500 truncate">{f.blob_path}</p>
+              </div>
+              <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 ml-3" />
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
