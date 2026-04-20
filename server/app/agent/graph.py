@@ -153,6 +153,7 @@ Container: {container_name}
 
 --- RULES ---
 - If file paths and columns are listed above, use them directly in run_sql. No need for search_catalog or get_file_schema.
+- BEFORE writing SQL, identify which file best matches the question. Match on file name AND description — e.g. "receipts" → a file with "RECEIPT" or "RECEIVABLE" in the name, "invoices" → "INVOICE" or "TRX", etc.
 - Write complete SQL with proper column names from above. Do not guess column names.
 - For multi-file questions, prefer JOINs. Always use LIMIT (default 100, or N if user asks for "top N").
 - Always check the JOIN RELATIONSHIPS section before writing any JOIN. Use the exact column name listed. Never guess JOIN columns.
