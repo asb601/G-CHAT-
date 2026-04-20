@@ -74,7 +74,9 @@ const contentsFetcher = async (key: string): Promise<FileItem[]> => {
   const data = await res.json();
   return [
     ...(data.folders ?? []).map(mapFolder),
-    ...(data.files ?? []).map(mapFile),
+    ...(data.files ?? [])
+      .filter((f: { name: string }) => !f.name.toLowerCase().endsWith(".parquet"))
+      .map(mapFile),
   ];
 };
 
@@ -227,6 +229,36 @@ export default function FoldersPage() {
     }
   }, []);
 
+  const [reingestLoading, setReingestLoading] = useState(false);
+
+  const handleReingestAll = useCallback(async () => {
+    setReingestLoading(true);
+    try {
+      const res = await apiFetch("/api/admin/reingest-all", { method: "POST" });
+      if (!res.ok) {
+        setReingestLoading(false);
+        return;
+      }
+      // Poll until all files are done re-ingesting
+      const poll = setInterval(async () => {
+        await mutate();
+        const freshItems = await contentsFetcher(swrKey);
+        const stillPending = freshItems.some(
+          (i) => i.type !== "folder" && (i.status === "pending" || i.status === "not_ingested")
+        );
+        if (!stillPending) {
+          clearInterval(poll);
+          setReingestLoading(false);
+          await mutate();
+        }
+      }, 5000);
+      // Safety: stop after 5 minutes
+      setTimeout(() => { clearInterval(poll); setReingestLoading(false); mutate(); }, 300_000);
+    } catch {
+      setReingestLoading(false);
+    }
+  }, [mutate, swrKey]);
+
   const handleCreateFolder = useCallback(
     async (name: string) => {
       const payload = {
@@ -288,6 +320,8 @@ export default function FoldersPage() {
       onBack={folderStack.length > 0 ? handleBack : undefined}
       onCancelUpload={handleCancelUpload}
       onCancelAllUploads={handleCancelAll}
+      onReingestAll={isAdmin ? handleReingestAll : undefined}
+      reingestLoading={reingestLoading}
     />
   );
 }

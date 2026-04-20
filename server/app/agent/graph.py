@@ -92,6 +92,7 @@ async def _load_catalog(db: AsyncSession) -> dict | None:
             "file_b_path": r.file_b_path,
             "shared_column": r.shared_column,
             "confidence_score": r.confidence_score,
+            "join_type": r.join_type,
         }
         for r in all_rels
     ]
@@ -154,6 +155,8 @@ Container: {container_name}
 - If file paths and columns are listed above, use them directly in run_sql. No need for search_catalog or get_file_schema.
 - Write complete SQL with proper column names from above. Do not guess column names.
 - For multi-file questions, use JOINs or multiple run_sql calls.
+- Always check the JOIN RELATIONSHIPS section before writing any JOIN. Use the exact column name listed. Never guess JOIN columns.
+- If a JOIN returns 0 rows — stop immediately. Call get_file_schema on both files to verify the exact column names and types, then rewrite the JOIN once with the correct columns.
 - Give a direct answer with actual data. Bold the key numbers.
 - Max {max_calls} tool calls.
 """
@@ -332,12 +335,45 @@ async def _build_agent_context(
             " inspect_data_format() — use to understand column formats before writing SQL."
         )
 
+    # ── JOIN relationships section (deduplicated) ──
+    join_note = ""
+    usable_rels = [r for r in relationships if r.get("confidence_score", 0) >= 0.5]
+    if usable_rels and parquet_paths_all:
+        seen_pairs: set[tuple[str, str, str]] = set()
+        join_lines = []
+        for rel in usable_rels:
+            a_path, b_path = rel["file_a_path"], rel["file_b_path"]
+            # Deduplicate bidirectional pairs
+            key = (min(a_path, b_path), max(a_path, b_path), rel["shared_column"])
+            if key in seen_pairs:
+                continue
+            seen_pairs.add(key)
+
+            pq_a = parquet_paths_all.get(a_path)
+            pq_b = parquet_paths_all.get(b_path)
+            if pq_a and pq_b:
+                join_lines.append(
+                    f"  az://{container_name}/{pq_a}  ←→  az://{container_name}/{pq_b}\n"
+                    f"  JOIN ON: {rel['shared_column']}\n"
+                    f"  Type: {rel.get('join_type', 'LEFT JOIN')}  "
+                    f"Confidence: {rel['confidence_score']}"
+                )
+        if join_lines:
+            join_note = (
+                "\n--- JOIN RELATIONSHIPS (use these exact column names) ---\n"
+                "These files share columns and can be JOINed directly:\n"
+                + "\n".join(join_lines)
+                + "\nAlways use these exact column names when writing JOIN conditions.\n"
+            )
+
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
         container_name=container_name,
         max_calls=MAX_TOOL_CALLS,
         parquet_note=parquet_note,
         sample_note=sample_note,
     )
+    if join_note:
+        system_prompt += join_note
     if conversation_context:
         system_prompt += (
             "\n\n--- CONVERSATION HISTORY ---\n"

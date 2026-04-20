@@ -81,6 +81,8 @@ interface FileManagerViewProps {
   onBack?: () => void;
   onCancelUpload?: (fileIndex: number) => void;
   onCancelAllUploads?: () => void;
+  onReingestAll?: () => void;
+  reingestLoading?: boolean;
 }
 
 type ViewMode = "grid" | "list";
@@ -388,6 +390,8 @@ export default function FileManagerView({
   onBack,
   onCancelUpload,
   onCancelAllUploads,
+  onReingestAll,
+  reingestLoading,
 }: FileManagerViewProps) {
   const items = files ?? [];
   const [view, setView] = useState<ViewMode>("grid");
@@ -580,6 +584,22 @@ export default function FileManagerView({
                   ))}
                 </select>
               )}
+              {onReingestAll && (
+                <button
+                  onClick={onReingestAll}
+                  disabled={reingestLoading}
+                  className={cn(
+                    "h-7 px-2.5 flex items-center gap-1.5 rounded-md text-xs font-medium transition-colors",
+                    reingestLoading
+                      ? "text-amber-400/70 bg-amber-400/10 cursor-not-allowed"
+                      : "text-amber-400 hover:bg-amber-400/10"
+                  )}
+                >
+                  <Zap className={cn("w-3.5 h-3.5", reingestLoading && "animate-pulse")} />
+                  {reingestLoading ? "Re-ingesting…" : "Re-ingest All"}
+                </button>
+              )}
+              <div className="w-px h-4 bg-border" />
               <button
                 onClick={() => {
                   setCreatingFolder(true);

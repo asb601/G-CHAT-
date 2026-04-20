@@ -222,8 +222,10 @@ async def detect_relationships(
     other_files = list(result.scalars().all())
 
     this_columns = {c["name"].lower(): c for c in columns_info}
-    this_samples = {
-        c["name"].lower(): set(str(v) for v in c.get("sample_values", []))
+    this_values = {
+        c["name"].lower(): set(
+            str(v) for v in (c.get("unique_values") or c.get("sample_values") or [])
+        )
         for c in columns_info
     }
 
@@ -233,8 +235,10 @@ async def detect_relationships(
             continue
 
         other_columns = {c["name"].lower(): c for c in other.columns_info}
-        other_samples = {
-            c["name"].lower(): set(str(v) for v in c.get("sample_values", []))
+        other_values = {
+            c["name"].lower(): set(
+                str(v) for v in (c.get("unique_values") or c.get("sample_values") or [])
+            )
             for c in other.columns_info
         }
 
@@ -242,8 +246,8 @@ async def detect_relationships(
             if col_name not in other_columns:
                 continue
 
-            this_vals = this_samples.get(col_name, set())
-            other_vals = other_samples.get(col_name, set())
+            this_vals = this_values.get(col_name, set())
+            other_vals = other_values.get(col_name, set())
             if this_vals and other_vals:
                 overlap = len(this_vals & other_vals)
                 value_score = overlap / max(len(this_vals), len(other_vals))
