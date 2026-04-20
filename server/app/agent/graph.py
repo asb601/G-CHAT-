@@ -516,6 +516,8 @@ async def run_agent_query(query: str, db: AsyncSession, *, conversation_context:
     # ── Validate & enrich response ──
     if not answer and sql_results:
         answer = "Here are the results:"
+    elif not answer and not sql_results:
+        answer = _fallback_answer(final_msgs)
 
     chart = _infer_chart(answer, sql_results)
 
@@ -633,6 +635,8 @@ async def run_agent_query_stream(
     # ── Validate & enrich response ──
     if not final_answer and sql_results:
         final_answer = "Here are the results:"
+    elif not final_answer and not sql_results:
+        final_answer = _fallback_answer_from_outputs(tool_outputs)
 
     chart = _infer_chart(final_answer, sql_results)
 
@@ -651,6 +655,61 @@ async def run_agent_query_stream(
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _fallback_answer(messages: list) -> str:
+    """Build a user-facing message when the LLM produced no text answer."""
+    errors = []
+    for msg in messages:
+        if not isinstance(msg, ToolMessage):
+            continue
+        content = msg.content if isinstance(msg.content, str) else str(msg.content)
+        if '"error"' in content:
+            try:
+                data = json.loads(content)
+                if "error" in data:
+                    errors.append(data["error"][:200])
+            except Exception:
+                pass
+    if errors:
+        unique = list(dict.fromkeys(errors))[:3]
+        detail = "\n".join(f"- {e}" for e in unique)
+        return (
+            "I tried to query your data but ran into errors:\n\n"
+            f"{detail}\n\n"
+            "Try rephrasing with specific column names from the file manager, "
+            "or check that the relevant files are uploaded."
+        )
+    return (
+        "I wasn't able to find an answer. Try rephrasing your question "
+        "with specific file or column names you see in the file manager."
+    )
+
+
+def _fallback_answer_from_outputs(tool_outputs: list[str]) -> str:
+    """Build a user-facing message from raw tool output strings (streaming path)."""
+    errors = []
+    for output in tool_outputs:
+        if '"error"' in output:
+            try:
+                data = json.loads(output)
+                if "error" in data:
+                    errors.append(data["error"][:200])
+            except Exception:
+                pass
+    if errors:
+        unique = list(dict.fromkeys(errors))[:3]
+        detail = "\n".join(f"- {e}" for e in unique)
+        return (
+            "I tried to query your data but ran into errors:\n\n"
+            f"{detail}\n\n"
+            "Try rephrasing with specific column names from the file manager, "
+            "or check that the relevant files are uploaded."
+        )
+    return (
+        "I wasn't able to find an answer. Try rephrasing your question "
+        "with specific file or column names you see in the file manager."
+    )
+
 
 def _infer_chart(answer: str, rows: list[dict]) -> dict | None:
     if not rows:
