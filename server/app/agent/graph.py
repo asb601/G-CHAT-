@@ -221,9 +221,10 @@ def _build_agent_node(all_tools: list):
                         iteration=count + 1,
                         retries=attempt)
 
+        n_calls = len(getattr(response, "tool_calls", None) or [])
         return {
             "messages": [response],
-            "tool_call_count": count + (1 if getattr(response, "tool_calls", None) else 0),
+            "tool_call_count": count + n_calls,
         }
 
     return agent_node
@@ -325,13 +326,11 @@ async def _build_agent_context(
         parquet_note = (
             "Available parquet files (use directly in run_sql — no search_catalog needed):\n"
             + "\n".join(lines)
-            + "\nUse get_file_schema to inspect column types and sample values before writing complex queries."
         )
     elif parquet_blob_path:
         parquet_note = (
             f"Parquet path (use directly in run_sql — no search_catalog needed):\n"
             f"  read_parquet('az://{container_name}/{parquet_blob_path}')"
-            "\nUse get_file_schema to inspect column types and sample values."
         )
 
     sample_note = ""
