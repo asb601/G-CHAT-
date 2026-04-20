@@ -79,16 +79,6 @@ async def sample_file(
                     }
                 )
 
-            def _json_safe(rows: list[dict]) -> list[dict]:
-                safe = []
-                for row in rows:
-                    safe.append({
-                        k: v.isoformat() if hasattr(v, "isoformat") else
-                           (str(v) if not isinstance(v, (str, int, float, bool, type(None))) else v)
-                        for k, v in row.items()
-                    })
-                return safe
-
             return {
                 "columns_info": columns_info,
                 "sample_rows": _json_safe(df.astype(object).fillna("").to_dict("records")),
@@ -116,42 +106,58 @@ async def sample_file(
     return result
 
 
+def _json_safe(rows: list[dict]) -> list[dict]:
+    safe = []
+    for row in rows:
+        safe.append({
+            k: v.isoformat() if hasattr(v, "isoformat") else
+               (str(v) if not isinstance(v, (str, int, float, bool, type(None))) else v)
+            for k, v in row.items()
+        })
+    return safe
+
+
+def execute_query_sync(
+    sql: str, connection_string: str, max_rows: int = 1000,
+) -> tuple[list[dict], int]:
+    """Synchronous SQL execution. Returns (rows, total_row_count). Rows capped at max_rows."""
+    start = time.perf_counter()
+    chat_logger.info("duckdb", operation="execute_query", status="started",
+                     sql_preview=sql[:300])
+    try:
+        t_conn = time.perf_counter()
+        conn = _get_connection(connection_string)
+        conn_ms = _ms(t_conn)
+
+        t_exec = time.perf_counter()
+        result = conn.execute(sql).df()
+        exec_ms = _ms(t_exec)
+
+        t_conv = time.perf_counter()
+        total = len(result)
+        rows = _json_safe(result.head(max_rows).fillna("").to_dict("records"))
+        conv_ms = _ms(t_conv)
+
+        chat_logger.info("duckdb", operation="execute_query", status="done",
+                         row_count=len(rows), total_rows=total,
+                         truncated=total > max_rows,
+                         conn_ms=conn_ms, exec_ms=exec_ms,
+                         convert_ms=conv_ms, total_ms=_ms(start))
+        return rows, total
+    except Exception:
+        _clear_connection(connection_string)
+        raise
+
+
 async def execute_query(
     sql: str, connection_string: str, timeout_seconds: int = 30,
     max_rows: int = 1000,
 ) -> tuple[list[dict], int]:
-    """Execute SQL and return (rows, total_row_count). Rows capped at max_rows."""
-    def _run() -> tuple[list[dict], int]:
-        try:
-            conn = _get_connection(connection_string)
-            result = conn.execute(sql).df()
-            total = len(result)
-
-            def _json_safe(rows: list[dict]) -> list[dict]:
-                safe = []
-                for row in rows:
-                    safe.append({
-                        k: v.isoformat() if hasattr(v, "isoformat") else
-                           (str(v) if not isinstance(v, (str, int, float, bool, type(None))) else v)
-                        for k, v in row.items()
-                    })
-                return safe
-
-            return _json_safe(result.head(max_rows).fillna("").to_dict("records")), total
-        except Exception:
-            _clear_connection(connection_string)
-            raise
-
-    start = time.perf_counter()
-    chat_logger.info("duckdb", operation="execute_query", status="started",
-                     sql_preview=sql[:300])
-    rows, total = await asyncio.wait_for(
-        asyncio.to_thread(_run), timeout=timeout_seconds
+    """Async SQL execution. Returns (rows, total_row_count). Rows capped at max_rows."""
+    return await asyncio.wait_for(
+        asyncio.to_thread(execute_query_sync, sql, connection_string, max_rows),
+        timeout=timeout_seconds,
     )
-    chat_logger.info("duckdb", operation="execute_query", status="done",
-                     row_count=len(rows), total_rows=total,
-                     truncated=total > max_rows, duration_ms=_ms(start))
-    return rows, total
 
 
 def _resolve_data_path(

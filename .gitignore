@@ -51,3 +51,5 @@ server/uploads/
 server/testing/*.csv
 server/testing/*.parquet
 VM_SETUP.md
+server/testing/Claude.dmg
+*.dmg

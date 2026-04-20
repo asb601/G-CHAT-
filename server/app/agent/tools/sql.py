@@ -2,17 +2,17 @@
 
 Key properties:
   - Uses Parquet path when available (10-50x faster than CSV)
-  - Proper async timeout (120s)
+  - Synchronous — runs inside LangGraph's thread pool, no event loop needed
   - Results capped at 1000 rows server-side with truncation warning
 """
 from __future__ import annotations
 
-import asyncio
 import json
 
 from langchain_core.tools import tool
 
-from app.core.duckdb_client import execute_query
+from app.core.duckdb_client import execute_query_sync
+from app.core.logger import chat_logger
 
 
 def build_sql_tools(
@@ -37,13 +37,11 @@ def build_sql_tools(
                 return json.dumps({"error": f"DML statement not allowed: {bad.strip()}"})
 
         try:
-            loop = asyncio.new_event_loop()
-            try:
-                rows, total = loop.run_until_complete(
-                    execute_query(sql, connection_string, timeout_seconds=120)
-                )
-            finally:
-                loop.close()
+            rows, total = execute_query_sync(sql, connection_string)
+            chat_logger.info("run_sql_result",
+                             sql_preview=sql[:200],
+                             rows_returned=len(rows),
+                             total_rows=total)
 
             state_store["sql_results"] = rows
             preview = rows[:5]
@@ -59,8 +57,6 @@ def build_sql_tools(
                     "Add a LIMIT, WHERE, or GROUP BY to get complete results."
                 )
             return json.dumps(resp, default=str)
-        except asyncio.TimeoutError:
-            return json.dumps({"error": "Query timed out after 120 seconds."})
         except Exception as exc:
             return json.dumps({"error": str(exc)[:500]})
 

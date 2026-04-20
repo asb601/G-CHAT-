@@ -247,6 +247,10 @@ async def trigger_parquet_conversion(
 
             await db.commit()
 
+        # Invalidate the agent's cached catalog so new files are visible immediately
+        from app.agent.graph import invalidate_catalog_cache
+        invalidate_catalog_cache()
+
         ingest_logger.info("parquet_conversion", status="done",
                            blob_path=blob_path, parquet_path=parquet_path,
                            size_bytes=parquet_size, total_rows=total_rows, job_id=job_id)
