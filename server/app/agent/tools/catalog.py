@@ -8,8 +8,16 @@ from langchain_core.tools import tool
 def build_catalog_tools(
     catalog: list[dict],
     relationships: list[dict],
+    parquet_paths: dict[str, str] | None = None,
+    container_name: str = "",
 ) -> list:
     """Return search_catalog and get_file_schema tools bound to the catalog."""
+
+    def _sql_path(blob_path: str) -> str:
+        """Return the read_parquet('az://...') expression for a blob_path, or the blob_path as-is."""
+        if parquet_paths and blob_path in parquet_paths:
+            return f"read_parquet('az://{container_name}/{parquet_paths[blob_path]}')"
+        return blob_path
 
     @tool
     def search_catalog(query: str) -> str:
@@ -28,6 +36,7 @@ def build_catalog_tools(
             if any(word in desc + cols + good_for for word in q_lower.split()):
                 results.append({
                     "blob_path": f["blob_path"],
+                    "sql_path": _sql_path(f["blob_path"]),
                     "description": f.get("ai_description", ""),
                     "columns": [c["name"] for c in (f.get("columns_info") or [])],
                     "key_metrics": f.get("key_metrics") or [],
@@ -45,6 +54,7 @@ def build_catalog_tools(
             results = [
                 {
                     "blob_path": f["blob_path"],
+                    "sql_path": _sql_path(f["blob_path"]),
                     "description": f.get("ai_description", ""),
                     "columns": [c["name"] for c in (f.get("columns_info") or [])],
                 }
@@ -94,6 +104,8 @@ def build_catalog_tools(
 
         return json.dumps({
             "blob_path": match["blob_path"],
+            "sql_path": _sql_path(match["blob_path"]),
+            "sql_hint": "Use the sql_path value directly in your SQL FROM clause.",
             "columns": cols,
             "key_metrics": match.get("key_metrics") or [],
             "key_dimensions": match.get("key_dimensions") or [],

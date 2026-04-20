@@ -292,7 +292,7 @@ async def _build_agent_context(
     # ── Build tools ──
     all_tools = []
     all_tools.extend(build_sql_tools(connection_string, container_name, parquet_blob_path, store))
-    all_tools.extend(build_catalog_tools(catalog, relationships))
+    all_tools.extend(build_catalog_tools(catalog, relationships, parquet_paths_all, container_name))
     all_tools.extend(build_stats_tool(store))
     all_tools.extend(build_sample_tool(sample_rows))
 
