@@ -461,6 +461,87 @@ async def _build_agent_context(
     }
 
 
+# ── Post-processing: explain failures ────────────────────────────────────────
+
+def _enrich_empty_answer(
+    answer: str,
+    sql_results: list[dict],
+    tool_calls: int,
+    messages: list | None = None,
+) -> str:
+    """
+    When the agent returns an empty or near-empty answer, build a helpful
+    explanation from the tool call history so the user isn't left staring
+    at a blank screen.
+    """
+    if answer and len(answer.strip()) > 20:
+        return answer  # answer is fine, nothing to do
+
+    # Gather clues from tool messages
+    errors: list[str] = []
+    zero_row_sqls: list[str] = []
+    missing_files: list[str] = []
+
+    if messages:
+        for msg in messages:
+            if not isinstance(msg, ToolMessage):
+                continue
+            content = msg.content if isinstance(msg.content, str) else str(msg.content)
+
+            # DuckDB file-not-found errors
+            if "No such file" in content or "does not exist" in content or "HTTP 404" in content:
+                # Try to extract the file path
+                for part in content.split("'"):
+                    if "az://" in part or ".parquet" in part or ".csv" in part:
+                        missing_files.append(part.split("/")[-1])
+                        break
+                else:
+                    errors.append("A file referenced in the query was not found.")
+
+            # Zero-row results
+            elif '"row_count": 0' in content or '"total_rows": 0' in content:
+                zero_row_sqls.append(content[:200])
+
+            # Generic errors
+            elif "error" in content.lower() or "exception" in content.lower():
+                errors.append(content[:150])
+
+    # Build explanation
+    parts = ["I wasn't able to get results for your question. Here's why:\n"]
+
+    if missing_files:
+        names = ", ".join(f"**{f}**" for f in set(missing_files))
+        parts.append(
+            f"- **File not found:** {names} doesn't exist in the data. "
+            "It may have been deleted or never uploaded."
+        )
+
+    if zero_row_sqls and not missing_files:
+        parts.append(
+            "- **Query returned 0 rows.** The JOIN or filter condition didn't match any data. "
+            "This usually means the columns used to join the files don't share matching values, "
+            "or the filter value doesn't exist in the dataset."
+        )
+
+    if errors and not missing_files and not zero_row_sqls:
+        parts.append(f"- **Error during query:** {errors[0]}")
+
+    if tool_calls >= MAX_TOOL_CALLS:
+        parts.append(
+            f"- **Hit the {MAX_TOOL_CALLS}-call limit** before finding an answer. "
+            "Try a simpler or more specific question."
+        )
+
+    if len(parts) == 1:
+        # No specific clue found
+        parts.append(
+            "- The agent could not determine a result. "
+            "Try rephrasing your question, or check that the relevant files are uploaded and ingested."
+        )
+
+    return "\n".join(parts)
+
+
 # ── Public entry point ────────────────────────────────────────────────────────
 
 async def run_agent_query(query: str, db: AsyncSession, *, conversation_context: str = "") -> dict:
@@ -514,6 +595,9 @@ async def run_agent_query(query: str, db: AsyncSession, *, conversation_context:
                      row_count=len(sql_results),
                      total_duration_ms=total_ms,
                      answer_preview=answer[:200])
+
+    # ── Enrich empty answers with explanation ──
+    answer = _enrich_empty_answer(answer, sql_results, tool_calls_made, final_msgs)
 
     chart = _infer_chart(answer, sql_results)
 
@@ -575,6 +659,7 @@ async def run_agent_query_stream(
     answer_tokens: list[str] = []
     tool_calls_made = 0
     files_used: set[str] = set()
+    tool_outputs: list[str] = []
 
     try:
         async for event in graph.astream_events(initial_state, version="v2"):
@@ -600,6 +685,7 @@ async def run_agent_query_stream(
                 tool_output = event["data"].get("output", "")
                 if isinstance(tool_output, str):
                     files_used.update(_extract_blob_paths(tool_output))
+                    tool_outputs.append(tool_output)
 
     except Exception as exc:
         chat_logger.exception("agent_stream_error", error=str(exc)[:400])
@@ -625,6 +711,11 @@ async def run_agent_query_stream(
                      row_count=len(sql_results),
                      total_duration_ms=total_ms,
                      answer_len=len(final_answer))
+
+    # ── Enrich empty answers with explanation ──
+    # Build lightweight ToolMessage objects from collected outputs for the enricher
+    synthetic_msgs = [ToolMessage(content=o, tool_call_id="") for o in tool_outputs]
+    final_answer = _enrich_empty_answer(final_answer, sql_results, tool_calls_made, synthetic_msgs)
 
     chart = _infer_chart(final_answer, sql_results)
 
