@@ -14,9 +14,11 @@ def build_catalog_tools(
     """Return search_catalog and get_file_schema tools bound to the catalog."""
 
     def _sql_path(blob_path: str) -> str:
-        """Return the read_parquet('az://...') expression for a blob_path, or the blob_path as-is."""
+        """Return the SQL-ready expression for a blob_path."""
         if parquet_paths and blob_path in parquet_paths:
             return f"read_parquet('az://{container_name}/{parquet_paths[blob_path]}')"
+        if container_name and blob_path:
+            return f"read_csv_auto('az://{container_name}/{blob_path}', sample_size=500, null_padding=true, ignore_errors=true)"
         return blob_path
 
     @tool
