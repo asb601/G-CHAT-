@@ -156,6 +156,7 @@ Container: {container_name}
 - Write complete SQL with proper column names from above. Do not guess column names.
 - For multi-file questions, use JOINs or multiple run_sql calls.
 - Always check the JOIN RELATIONSHIPS section before writing any JOIN. Use the exact column name listed. Never guess JOIN columns.
+- If two files need to be JOINed but NO relationship is listed for them, call get_file_schema on BOTH files first. Look for matching ID columns (they may have different names, e.g. CUSTOMER_ID vs CUST_ACCOUNT_ID). Verify actual column names before writing SQL.
 - If a JOIN returns 0 rows — stop immediately. Call get_file_schema on both files to verify the exact column names and types, then rewrite the JOIN once with the correct columns.
 - Give a direct answer with actual data. Bold the key numbers.
 - Max {max_calls} tool calls.
@@ -298,21 +299,52 @@ async def _build_agent_context(
     graph = _build_graph(all_tools)
 
     # ── System prompt ──
-    columns_by_blob: dict[str, list[str]] = {}
+    # Build a lookup from blob_path → full columns_info for enrichment
+    catalog_by_blob: dict[str, dict] = {}
     for entry in catalog:
-        cols = [c["name"] for c in (entry.get("columns_info") or [])]
-        if cols and entry.get("blob_path"):
-            columns_by_blob[entry["blob_path"]] = cols
+        bp = entry.get("blob_path")
+        if bp:
+            catalog_by_blob[bp] = entry
 
     parquet_note = ""
     if parquet_paths_all:
         lines = []
         for blob, pq in parquet_paths_all.items():
             line = f"  read_parquet('az://{container_name}/{pq}')"
-            cols = columns_by_blob.get(blob)
-            if cols:
-                line += f"\n    Columns: {', '.join(cols)}"
-            desc = next((e.get("ai_description") for e in catalog if e.get("blob_path") == blob), None)
+            entry = catalog_by_blob.get(blob)
+            cols_info = (entry.get("columns_info") or []) if entry else []
+
+            if cols_info:
+                # Column names for quick reference
+                col_names = [c["name"] for c in cols_info]
+                line += f"\n    Columns: {', '.join(col_names)}"
+
+                # Key identifiers: _id/_key/_number columns with high cardinality
+                # Shows types + sample values so the agent can reason about JOINs
+                identifiers = []
+                enums = []
+                for c in cols_info:
+                    uv = c.get("unique_values") or c.get("sample_values") or []
+                    name_lower = c["name"].lower()
+                    col_type = c.get("type", "")
+                    n_unique = len(uv)
+
+                    is_id_like = any(
+                        name_lower.endswith(s)
+                        for s in ("_id", "_key", "_number", "_code")
+                    )
+                    if is_id_like and n_unique > 5:
+                        sample_str = ", ".join(str(v) for v in uv[:5])
+                        identifiers.append(f"{c['name']} ({col_type}, e.g. {sample_str})")
+                    elif 1 <= n_unique <= 10 and "datetime" not in col_type.lower():
+                        enums.append(f"{c['name']} [{', '.join(str(v) for v in uv)}]")
+
+                if identifiers:
+                    line += f"\n    Identifiers: {'; '.join(identifiers)}"
+                if enums:
+                    line += f"\n    Enums: {'; '.join(enums[:8])}"
+
+            desc = entry.get("ai_description") if entry else None
             if desc:
                 line += f"\n    Description: {desc}"
             lines.append(line)
@@ -335,29 +367,46 @@ async def _build_agent_context(
             " inspect_data_format() — use to understand column formats before writing SQL."
         )
 
-    # ── JOIN relationships section (deduplicated) ──
+    # ── JOIN relationships section (deduplicated, filtered, capped) ──
     join_note = ""
-    usable_rels = [r for r in relationships if r.get("confidence_score", 0) >= 0.5]
+    usable_rels = [r for r in relationships if r.get("confidence_score", 0) >= 0.7]
     if usable_rels and parquet_paths_all:
         seen_pairs: set[tuple[str, str, str]] = set()
+        # Track per file-pair count to cap noise
+        pair_counts: dict[tuple[str, str], int] = {}
         join_lines = []
-        for rel in usable_rels:
+        for rel in sorted(usable_rels, key=lambda r: r["confidence_score"], reverse=True):
             a_path, b_path = rel["file_a_path"], rel["file_b_path"]
             # Deduplicate bidirectional pairs
-            key = (min(a_path, b_path), max(a_path, b_path), rel["shared_column"])
-            if key in seen_pairs:
+            pair_key = (min(a_path, b_path), max(a_path, b_path))
+            col_key = (*pair_key, rel["shared_column"])
+            if col_key in seen_pairs:
                 continue
-            seen_pairs.add(key)
+            seen_pairs.add(col_key)
+
+            # Max 3 relationships per file pair — keeps the best, drops noise
+            if pair_counts.get(pair_key, 0) >= 3:
+                continue
+            pair_counts[pair_key] = pair_counts.get(pair_key, 0) + 1
 
             pq_a = parquet_paths_all.get(a_path)
             pq_b = parquet_paths_all.get(b_path)
             if pq_a and pq_b:
+                shared = rel["shared_column"]
+                # Cross-column relationships show both column names
+                if "=" in shared:
+                    col_a, col_b = shared.split("=", 1)
+                    join_on = f"a.{col_a} = b.{col_b}"
+                else:
+                    join_on = shared
                 join_lines.append(
                     f"  az://{container_name}/{pq_a}  ←→  az://{container_name}/{pq_b}\n"
-                    f"  JOIN ON: {rel['shared_column']}\n"
+                    f"  JOIN ON: {join_on}\n"
                     f"  Type: {rel.get('join_type', 'LEFT JOIN')}  "
                     f"Confidence: {rel['confidence_score']}"
                 )
+            if len(join_lines) >= 30:  # global cap
+                break
         if join_lines:
             join_note = (
                 "\n--- JOIN RELATIONSHIPS (use these exact column names) ---\n"
