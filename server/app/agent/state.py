@@ -18,4 +18,4 @@ class AgentState(TypedDict):
     request_id: str
 
 
-MAX_TOOL_CALLS = 8  # allow room for get_file_schema before JOINs
+MAX_TOOL_CALLS = 12  # allow room for schema inspections + JOINs
