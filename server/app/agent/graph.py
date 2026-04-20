@@ -140,26 +140,26 @@ async def _load_catalog(db: AsyncSession) -> dict | None:
 
 SYSTEM_PROMPT_TEMPLATE = """You are a sharp, data-driven analyst with direct SQL access to structured data files stored in Azure Blob Storage.
 
---- RULES (follow strictly) ---
-1. Write ONE SQL query per question. For multi-file questions, use JOINs — never query tables separately.
-2. ALWAYS use LIMIT. "Top N" → ORDER BY ... DESC LIMIT N. No count specified → LIMIT 100. Never dump an entire table.
-3. Use the file paths and column names listed below directly. Do not guess column names.
-4. Before writing a JOIN, check the JOIN RELATIONSHIPS section. Use the exact columns listed.
-5. If no relationship is listed for two files, call get_file_schema on BOTH first to find matching columns.
-6. If a JOIN returns 0 rows, call get_file_schema on both files, then rewrite the JOIN once with correct columns.
-7. Give a direct answer with actual data. Bold key numbers. Explain what the results show.
-8. Max {max_calls} tool calls. Be efficient.
-
---- TOOLS ---
-1. run_sql — Execute DuckDB SQL against the files below.
-2. search_catalog — Find files when the paths below don't cover the question.
-3. get_file_schema — Get column names, types, and sample values for a file.
-4. inspect_data_format — Preview rows to check value formats before writing SQL.
-5. summarise_dataframe — Compute stats on the last run_sql result.
-
 Container: {container_name}
 {parquet_note}
 {sample_note}
+
+--- TOOLS ---
+1. run_sql: Execute any DuckDB SQL. File paths and column names are listed above.
+2. search_catalog: Find which file(s) to query when the paths above don't cover the question.
+3. get_file_schema: Get full column names, types, and sample values for a specific file.
+4. inspect_data_format: Preview a few rows to check value formats (e.g. date format, casing) before writing SQL. Not for answering — use run_sql.
+5. summarise_dataframe: Compute stats on the last run_sql result in memory.
+
+--- RULES ---
+- If file paths and columns are listed above, use them directly in run_sql. No need for search_catalog or get_file_schema.
+- Write complete SQL with proper column names from above. Do not guess column names.
+- For multi-file questions, prefer JOINs. Always use LIMIT (default 100, or N if user asks for "top N").
+- Always check the JOIN RELATIONSHIPS section before writing any JOIN. Use the exact column name listed. Never guess JOIN columns.
+- If two files need to be JOINed but NO relationship is listed for them, call get_file_schema on BOTH files first.
+- If a JOIN returns 0 rows — stop immediately. Call get_file_schema on both files to verify the exact column names and types, then rewrite the JOIN once with the correct columns.
+- Give a direct answer with actual data. Bold the key numbers.
+- Max {max_calls} tool calls.
 """
 
 
@@ -319,6 +319,29 @@ async def _build_agent_context(
                 col_names = [c["name"] for c in cols_info]
                 line += f"\n    Columns: {', '.join(col_names)}"
 
+                identifiers = []
+                enums = []
+                for c in cols_info:
+                    uv = c.get("unique_values") or c.get("sample_values") or []
+                    name_lower = c["name"].lower()
+                    col_type = c.get("type", "")
+                    n_unique = len(uv)
+
+                    is_id_like = any(
+                        name_lower.endswith(s)
+                        for s in ("_id", "_key", "_number", "_code")
+                    )
+                    if is_id_like and n_unique > 5:
+                        sample_str = ", ".join(str(v) for v in uv[:5])
+                        identifiers.append(f"{c['name']} ({col_type}, e.g. {sample_str})")
+                    elif 1 <= n_unique <= 10 and "datetime" not in col_type.lower():
+                        enums.append(f"{c['name']} [{', '.join(str(v) for v in uv)}]")
+
+                if identifiers:
+                    line += f"\n    Identifiers: {'; '.join(identifiers)}"
+                if enums:
+                    line += f"\n    Enums: {'; '.join(enums[:8])}"
+
             desc = entry.get("ai_description") if entry else None
             if desc:
                 line += f"\n    Description: {desc}"
@@ -326,11 +349,13 @@ async def _build_agent_context(
         parquet_note = (
             "Available parquet files (use directly in run_sql — no search_catalog needed):\n"
             + "\n".join(lines)
+            + "\nParquet covers the FULL dataset. Use it for any ordering, filtering, counting, or row retrieval."
         )
     elif parquet_blob_path:
         parquet_note = (
             f"Parquet path (use directly in run_sql — no search_catalog needed):\n"
             f"  read_parquet('az://{container_name}/{parquet_blob_path}')"
+            "\nParquet covers the FULL dataset. Use it for any ordering, filtering, counting, or row retrieval."
         )
 
     sample_note = ""
