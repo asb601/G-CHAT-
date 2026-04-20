@@ -224,7 +224,7 @@ def _build_agent_node(all_tools: list):
         n_calls = len(getattr(response, "tool_calls", None) or [])
         return {
             "messages": [response],
-            "tool_call_count": count + n_calls,
+            "tool_call_count": count + (1 if n_calls else 0),
         }
 
     return agent_node
