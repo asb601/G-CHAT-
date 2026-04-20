@@ -632,6 +632,7 @@ export default function ChatPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [expandedMsgId, setExpandedMsgId] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   // Conversation state
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
@@ -745,6 +746,9 @@ export default function ChatPage() {
     setIsLoading(true);
     setExpandedMsgId(null);
 
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     try {
       const res = await apiFetch("/api/chat/message/stream", {
         method: "POST",
@@ -753,6 +757,7 @@ export default function ChatPage() {
           query: trimmed,
           conversation_id: activeConvId,
         }),
+        signal: controller.signal,
       });
 
       if (!res.ok) {
@@ -872,14 +877,24 @@ export default function ChatPage() {
         });
       }
     } catch (err: unknown) {
-      const errMsg = err instanceof Error ? err.message : "Something went wrong.";
-      setMessages((prev) => [
-        ...prev,
-        { id: crypto.randomUUID(), role: "assistant", content: errMsg, error: true },
-      ]);
+      if (err instanceof DOMException && err.name === "AbortError") {
+        // User clicked stop — don't show error
+      } else {
+        const errMsg = err instanceof Error ? err.message : "Something went wrong.";
+        setMessages((prev) => [
+          ...prev,
+          { id: crypto.randomUUID(), role: "assistant", content: errMsg, error: true },
+        ]);
+      }
     } finally {
+      abortRef.current = null;
       setIsLoading(false);
     }
+  };
+
+  const handleStop = () => {
+    abortRef.current?.abort();
+    abortRef.current = null;
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -987,17 +1002,24 @@ export default function ChatPage() {
               rows={1}
               className="flex-1 resize-none bg-surface-raised border border-border rounded-lg px-4 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary"
             />
-            <button
-              type="submit"
-              disabled={!input.trim() || isLoading}
-              className="shrink-0 h-10 w-10 flex items-center justify-center rounded-lg bg-primary text-primary-foreground disabled:opacity-40 transition-opacity hover:opacity-90"
-            >
-              {isLoading ? (
-                <RefreshCw className="w-4 h-4 animate-spin" />
-              ) : (
+            {isLoading ? (
+              <button
+                type="button"
+                onClick={handleStop}
+                className="shrink-0 h-10 w-10 flex items-center justify-center rounded-lg bg-danger/90 text-white transition-opacity hover:opacity-90"
+                title="Stop generating"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            ) : (
+              <button
+                type="submit"
+                disabled={!input.trim()}
+                className="shrink-0 h-10 w-10 flex items-center justify-center rounded-lg bg-primary text-primary-foreground disabled:opacity-40 transition-opacity hover:opacity-90"
+              >
                 <Send className="w-4 h-4" />
-              )}
-            </button>
+              </button>
+            )}
           </form>
         </div>
       </div>
