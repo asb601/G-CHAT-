@@ -19,6 +19,8 @@ import {
   PanelLeft,
   Search,
 } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { cn } from "@/lib/utils";
 import { apiFetch } from "@/lib/auth";
 
@@ -195,6 +197,28 @@ function AnalyticsGrid({ data }: { data: Record<string, unknown>[] }) {
 
 // ── Data table ────────────────────────────────────────────────────────────────
 
+function formatCell(value: unknown): string {
+  if (value === null || value === undefined) return "—";
+  const s = String(value);
+  // ISO datetime → readable format
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(s)) {
+    try {
+      const d = new Date(s);
+      return d.toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
+    } catch {
+      return s;
+    }
+  }
+  // Large numbers → comma-separated
+  const num = Number(s);
+  if (!isNaN(num) && s.trim() !== "" && Math.abs(num) >= 1000) {
+    return num % 1 === 0
+      ? num.toLocaleString("en-US")
+      : num.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+  return s;
+}
+
 function DataTable({ data }: { data: Record<string, unknown>[] }) {
   if (!data.length)
     return (
@@ -209,35 +233,50 @@ function DataTable({ data }: { data: Record<string, unknown>[] }) {
       <table className="min-w-full divide-y divide-border">
         <thead className="bg-surface-raised">
           <tr>
+            <th className="px-2 py-2 text-center font-medium text-muted-foreground w-10">#</th>
             {cols.map((c) => (
               <th
                 key={c}
                 className="px-3 py-2 text-left font-medium text-muted-foreground whitespace-nowrap"
               >
-                {c}
+                {c.replace(/_/g, " ")}
               </th>
             ))}
           </tr>
         </thead>
         <tbody className="divide-y divide-border bg-surface">
           {rows.map((row, i) => (
-            <tr key={i} className="hover:bg-surface-raised/60 transition-colors">
-              {cols.map((c) => (
-                <td
-                  key={c}
-                  className="px-3 py-1.5 whitespace-nowrap text-foreground max-w-[180px] truncate"
-                  title={String(row[c] ?? "")}
-                >
-                  {String(row[c] ?? "")}
-                </td>
-              ))}
+            <tr
+              key={i}
+              className={cn(
+                "hover:bg-surface-raised/60 transition-colors",
+                i % 2 === 1 && "bg-surface-raised/30"
+              )}
+            >
+              <td className="px-2 py-1.5 text-center text-muted-foreground tabular-nums">{i + 1}</td>
+              {cols.map((c) => {
+                const formatted = formatCell(row[c]);
+                const isNum = !isNaN(Number(row[c])) && String(row[c]).trim() !== "";
+                return (
+                  <td
+                    key={c}
+                    className={cn(
+                      "px-3 py-1.5 text-foreground max-w-[280px] truncate",
+                      isNum ? "tabular-nums text-right" : "text-left"
+                    )}
+                    title={String(row[c] ?? "")}
+                  >
+                    {formatted}
+                  </td>
+                );
+              })}
             </tr>
           ))}
         </tbody>
       </table>
       {data.length > 100 && (
-        <p className="px-3 py-1.5 text-xs text-muted-foreground border-t border-border bg-surface-raised">
-          Showing 100 of {data.length} rows
+        <p className="px-3 py-2 text-xs text-muted-foreground border-t border-border bg-surface-raised text-center">
+          Showing 100 of {data.length.toLocaleString()} rows
         </p>
       )}
     </div>
@@ -335,36 +374,12 @@ function ResultsAccordion({
   );
 }
 
-// ── Answer text ───────────────────────────────────────────────────────────────
+// ── Answer text (full markdown) ───────────────────────────────────────────────
 
 function AnswerText({ text }: { text: string }) {
-  const lines = text.split("\n").filter((l, i, a) => !(l === "" && a[i - 1] === ""));
   return (
-    <div className="space-y-1 text-sm leading-relaxed">
-      {lines.map((line, i) => {
-        if (!line.trim()) return <div key={i} className="h-1" />;
-        const parts = line.split(/\*\*(.+?)\*\*/g);
-        return (
-          <p
-            key={i}
-            className={cn(
-              line.trimStart().startsWith("- ") || line.trimStart().startsWith("• ")
-                ? "pl-3 before:content-['•'] before:-ml-3 before:mr-1 before:text-muted-foreground"
-                : ""
-            )}
-          >
-            {parts.map((part, j) =>
-              j % 2 === 1 ? (
-                <strong key={j} className="font-semibold text-foreground">
-                  {part}
-                </strong>
-              ) : (
-                <span key={j}>{part}</span>
-              )
-            )}
-          </p>
-        );
-      })}
+    <div className="prose prose-sm dark:prose-invert max-w-none prose-p:my-1 prose-li:my-0.5 prose-headings:mt-3 prose-headings:mb-1 prose-hr:my-2 prose-pre:bg-surface-raised prose-pre:border prose-pre:border-border prose-code:text-primary prose-code:before:content-none prose-code:after:content-none prose-table:text-xs prose-th:px-2 prose-th:py-1 prose-td:px-2 prose-td:py-1">
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
     </div>
   );
 }

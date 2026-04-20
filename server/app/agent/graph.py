@@ -461,85 +461,150 @@ async def _build_agent_context(
     }
 
 
-# ── Post-processing: explain failures ────────────────────────────────────────
+# ── Post-processing: validate & enrich every response ────────────────────────
 
-def _enrich_empty_answer(
+def _validate_response(
     answer: str,
     sql_results: list[dict],
     tool_calls: int,
     messages: list | None = None,
 ) -> str:
     """
-    When the agent returns an empty or near-empty answer, build a helpful
-    explanation from the tool call history so the user isn't left staring
-    at a blank screen.
+    Runs on EVERY agent response. Three jobs:
+      1. If answer + data look good → pass through (maybe add quality notes)
+      2. If data exists but answer is empty → provide a short intro
+      3. If no data and no answer → diagnose WHY from tool history and guide user
+
+    Never calls the LLM — pure Python checks, <1ms.
     """
-    if answer and len(answer.strip()) > 20:
-        return answer  # answer is fine, nothing to do
+    notes: list[str] = []
 
-    # Gather clues from tool messages
-    errors: list[str] = []
-    zero_row_sqls: list[str] = []
-    missing_files: list[str] = []
+    # ── 1. Data quality checks (run when we have rows) ──
+    if sql_results:
+        _check_data_quality(sql_results, notes)
 
-    if messages:
-        for msg in messages:
-            if not isinstance(msg, ToolMessage):
-                continue
-            content = msg.content if isinstance(msg.content, str) else str(msg.content)
-
-            # DuckDB file-not-found errors
-            if "No such file" in content or "does not exist" in content or "HTTP 404" in content:
-                # Try to extract the file path
-                for part in content.split("'"):
-                    if "az://" in part or ".parquet" in part or ".csv" in part:
-                        missing_files.append(part.split("/")[-1])
-                        break
-                else:
-                    errors.append("A file referenced in the query was not found.")
-
-            # Zero-row results
-            elif '"row_count": 0' in content or '"total_rows": 0' in content:
-                zero_row_sqls.append(content[:200])
-
-            # Generic errors
-            elif "error" in content.lower() or "exception" in content.lower():
-                errors.append(content[:150])
-
-    # Build explanation
-    parts = ["I wasn't able to get results for your question. Here's why:\n"]
-
-    if missing_files:
-        names = ", ".join(f"**{f}**" for f in set(missing_files))
-        parts.append(
-            f"- **File not found:** {names} doesn't exist in the data. "
-            "It may have been deleted or never uploaded."
-        )
-
-    if zero_row_sqls and not missing_files:
-        parts.append(
-            "- **Query returned 0 rows.** The JOIN or filter condition didn't match any data. "
-            "This usually means the columns used to join the files don't share matching values, "
-            "or the filter value doesn't exist in the dataset."
-        )
-
-    if errors and not missing_files and not zero_row_sqls:
-        parts.append(f"- **Error during query:** {errors[0]}")
-
+    # ── 2. Tool-call efficiency warning ──
     if tool_calls >= MAX_TOOL_CALLS:
-        parts.append(
-            f"- **Hit the {MAX_TOOL_CALLS}-call limit** before finding an answer. "
-            "Try a simpler or more specific question."
+        notes.append(
+            f"⚠️ Hit the {MAX_TOOL_CALLS}-call limit. "
+            "The answer may be incomplete — try a more specific question."
         )
 
-    if len(parts) == 1:
-        # No specific clue found
+    # ── 3. Diagnose tool errors from message history ──
+    tool_issues = _diagnose_tool_history(messages) if messages else []
+
+    # ── Build final answer ──
+
+    # Case A: Good answer text exists
+    if answer and len(answer.strip()) > 20:
+        if notes or tool_issues:
+            return answer + "\n\n---\n" + "\n".join(notes + tool_issues)
+        return answer
+
+    # Case B: No answer text, but we have data rows
+    if sql_results:
+        intro = "Here are the results:"
+        if notes:
+            intro += "\n\n" + "\n".join(notes)
+        return intro
+
+    # Case C: No answer, no data — full failure explanation
+    parts = ["I wasn't able to answer your question. Here's what I found:\n"]
+
+    if tool_issues:
+        parts.extend(tool_issues)
+
+    if not tool_issues:
         parts.append(
-            "- The agent could not determine a result. "
-            "Try rephrasing your question, or check that the relevant files are uploaded and ingested."
+            "- Could not find matching data. "
+            "Check that the relevant files are uploaded, or try rephrasing with "
+            "specific file/column names you see in the file manager."
         )
 
     return "\n".join(parts)
+
+
+def _check_data_quality(rows: list[dict], notes: list[str]) -> None:
+    """Fast checks on returned data — flags suspicious patterns."""
+    if not rows:
+        return
+
+    cols = list(rows[0].keys())
+    n_rows = len(rows)
+
+    for col in cols:
+        values = [r.get(col) for r in rows]
+        unique = set(values)
+
+        # All rows have the exact same value — suspicious
+        if len(unique) == 1 and n_rows > 5:
+            val = values[0]
+            # Truncate long values for display
+            display = str(val)[:60] + "..." if len(str(val)) > 60 else str(val)
+            notes.append(
+                f"⚠️ Column **{col}** has the same value (`{display}`) in all "
+                f"{n_rows} rows — this might be test/synthetic data, "
+                "or your filter may be too narrow."
+            )
+
+        # Very low cardinality relative to row count (but not a single value)
+        elif 2 <= len(unique) <= 3 and n_rows > 50:
+            vals_str = ", ".join(f"`{v}`" for v in sorted(str(v) for v in unique))
+            notes.append(
+                f"ℹ️ Column **{col}** only has {len(unique)} distinct values "
+                f"({vals_str}) across {n_rows} rows."
+            )
+
+
+def _diagnose_tool_history(messages: list) -> list[str]:
+    """Scan tool messages for errors and build user-facing diagnostics."""
+    issues: list[str] = []
+    missing_files: list[str] = []
+    zero_row_count = 0
+    errors: list[str] = []
+
+    for msg in messages:
+        if not isinstance(msg, ToolMessage):
+            continue
+        content = msg.content if isinstance(msg.content, str) else str(msg.content)
+
+        # File not found
+        if "No such file" in content or "does not exist" in content or "HTTP 404" in content:
+            for part in content.split("'"):
+                if "az://" in part or ".parquet" in part or ".csv" in part:
+                    missing_files.append(part.split("/")[-1])
+                    break
+
+        # Zero-row queries
+        elif '"row_count": 0' in content or '"total_rows": 0' in content:
+            zero_row_count += 1
+
+        # Generic errors
+        elif "error" in content.lower() and "sql" in content.lower():
+            # Extract just the error message, not the full blob
+            for line in content.split("\n"):
+                if "error" in line.lower():
+                    errors.append(line.strip()[:150])
+                    break
+
+    if missing_files:
+        names = ", ".join(f"**{f}**" for f in sorted(set(missing_files)))
+        issues.append(
+            f"- **File not found:** {names} — this file doesn't exist in your data. "
+            "It may have been deleted, or check the exact file name in the file manager."
+        )
+
+    if zero_row_count > 0 and not missing_files:
+        issues.append(
+            f"- **Queries returned 0 rows** ({zero_row_count} attempt{'s' if zero_row_count > 1 else ''}). "
+            "The filter or JOIN condition didn't match any data. Try asking without filters first, "
+            "or check if the column values you're filtering on actually exist."
+        )
+
+    if errors and not missing_files and not zero_row_count:
+        issues.append(f"- **SQL error:** {errors[0]}")
+
+    return issues
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -596,8 +661,8 @@ async def run_agent_query(query: str, db: AsyncSession, *, conversation_context:
                      total_duration_ms=total_ms,
                      answer_preview=answer[:200])
 
-    # ── Enrich empty answers with explanation ──
-    answer = _enrich_empty_answer(answer, sql_results, tool_calls_made, final_msgs)
+    # ── Validate & enrich response ──
+    answer = _validate_response(answer, sql_results, tool_calls_made, final_msgs)
 
     chart = _infer_chart(answer, sql_results)
 
@@ -712,10 +777,9 @@ async def run_agent_query_stream(
                      total_duration_ms=total_ms,
                      answer_len=len(final_answer))
 
-    # ── Enrich empty answers with explanation ──
-    # Build lightweight ToolMessage objects from collected outputs for the enricher
+    # ── Validate & enrich response ──
     synthetic_msgs = [ToolMessage(content=o, tool_call_id="") for o in tool_outputs]
-    final_answer = _enrich_empty_answer(final_answer, sql_results, tool_calls_made, synthetic_msgs)
+    final_answer = _validate_response(final_answer, sql_results, tool_calls_made, synthetic_msgs)
 
     chart = _infer_chart(final_answer, sql_results)
 
