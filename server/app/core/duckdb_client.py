@@ -117,14 +117,6 @@ def _json_safe(rows: list[dict]) -> list[dict]:
     return safe
 
 
-def _needs_limit(sql: str) -> bool:
-    """Return True if the SQL has no LIMIT clause (crude but effective)."""
-    # Strip trailing semicolons/whitespace, check if LIMIT appears after last FROM/SELECT
-    s = sql.strip().rstrip(";").upper()
-    # Don't add LIMIT to aggregations or subqueries that already have it
-    return "LIMIT" not in s
-
-
 def execute_query_sync(
     sql: str, connection_string: str, max_rows: int = 1000,
 ) -> tuple[list[dict], int]:
@@ -137,15 +129,8 @@ def execute_query_sync(
         conn = _get_connection(connection_string)
         conn_ms = _ms(t_conn)
 
-        # Safety: inject LIMIT if the query doesn't have one to prevent OOM on large files
-        exec_sql = sql
-        if _needs_limit(sql):
-            exec_sql = f"SELECT * FROM ({sql.strip().rstrip(';')}) AS _q LIMIT {max_rows + 1}"
-            chat_logger.info("duckdb", operation="auto_limit_injected",
-                             original_sql=sql[:200])
-
         t_exec = time.perf_counter()
-        result = conn.execute(exec_sql).df()
+        result = conn.execute(sql).df()
         exec_ms = _ms(t_exec)
 
         t_conv = time.perf_counter()

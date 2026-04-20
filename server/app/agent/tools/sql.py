@@ -4,21 +4,15 @@ Key properties:
   - Uses Parquet path when available (10-50x faster than CSV)
   - Synchronous — runs inside LangGraph's thread pool, no event loop needed
   - Results capped at 1000 rows server-side with truncation warning
-  - 60-second timeout to prevent hanging on huge files
 """
 from __future__ import annotations
 
 import json
-import signal
-import threading
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
 from langchain_core.tools import tool
 
 from app.core.duckdb_client import execute_query_sync
 from app.core.logger import chat_logger
-
-_SQL_TIMEOUT = 60  # seconds
 
 
 def build_sql_tools(
@@ -43,17 +37,7 @@ def build_sql_tools(
                 return json.dumps({"error": f"DML statement not allowed: {bad.strip()}"})
 
         try:
-            # Run with timeout to prevent hanging on huge files
-            with ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(execute_query_sync, sql, connection_string)
-                try:
-                    rows, total = future.result(timeout=_SQL_TIMEOUT)
-                except FuturesTimeout:
-                    chat_logger.warning("run_sql_timeout", sql_preview=sql[:200],
-                                        timeout_s=_SQL_TIMEOUT)
-                    return json.dumps({"error": f"Query timed out after {_SQL_TIMEOUT}s. "
-                                       "Try adding a LIMIT or more specific WHERE clause."})
-
+            rows, total = execute_query_sync(sql, connection_string)
             chat_logger.info("run_sql_result",
                              sql_preview=sql[:200],
                              rows_returned=len(rows),
@@ -73,8 +57,6 @@ def build_sql_tools(
                     "Add a LIMIT, WHERE, or GROUP BY to get complete results."
                 )
             return json.dumps(resp, default=str)
-        except FuturesTimeout:
-            return json.dumps({"error": f"Query timed out after {_SQL_TIMEOUT}s."})
         except Exception as exc:
             return json.dumps({"error": str(exc)[:500]})
 

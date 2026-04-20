@@ -17,6 +17,8 @@ def build_catalog_tools(
         """Return the SQL-ready expression for a blob_path."""
         if parquet_paths and blob_path in parquet_paths:
             return f"read_parquet('az://{container_name}/{parquet_paths[blob_path]}')"
+        if container_name and blob_path:
+            return f"read_csv_auto('az://{container_name}/{blob_path}', sample_size=500, null_padding=true, ignore_errors=true)"
         return blob_path
 
     @tool
