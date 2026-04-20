@@ -155,11 +155,12 @@ Container: {container_name}
 - If file paths and columns are listed above, use them directly in run_sql. No need for search_catalog or get_file_schema.
 - BEFORE writing SQL, identify which file best matches the question. Match on file name AND description — e.g. "receipts" → a file with "RECEIPT" or "RECEIVABLE" in the name, "invoices" → "INVOICE" or "TRX", etc.
 - Write complete SQL with proper column names from above. Do not guess column names.
-- For multi-file questions, prefer JOINs. Always use LIMIT (default 100, or N if user asks for "top N").
+- ALWAYS honour the exact count the user asks for. "top 20" means LIMIT 20, "top 50" means LIMIT 50. Default LIMIT 100 if no count specified. NEVER return fewer rows than requested unless the data genuinely has fewer.
+- For multi-file questions, prefer JOINs.
 - Always check the JOIN RELATIONSHIPS section before writing any JOIN. Use the exact column name listed. Never guess JOIN columns.
 - If two files need to be JOINed but NO relationship is listed for them, call get_file_schema on BOTH files first.
 - If a JOIN returns 0 rows — stop immediately. Call get_file_schema on both files to verify the exact column names and types, then rewrite the JOIN once with the correct columns.
-- Give a direct answer with actual data. Bold the key numbers.
+- Give a direct answer with actual data. Bold the key numbers. Show ALL rows returned by the query, not a subset.
 - Max {max_calls} tool calls.
 """
 
