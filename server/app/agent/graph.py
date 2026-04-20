@@ -459,116 +459,6 @@ async def _build_agent_context(
     }
 
 
-# ── Post-processing: validate & enrich every response ────────────────────────
-
-def _validate_response(
-    answer: str,
-    sql_results: list[dict],
-    tool_calls: int,
-    messages: list | None = None,
-) -> str:
-    """
-    Runs on EVERY agent response. Three jobs:
-      1. If answer + data look good → pass through (maybe add quality notes)
-      2. If data exists but answer is empty → provide a short intro
-      3. If no data and no answer → diagnose WHY from tool history and guide user
-
-    Never calls the LLM — pure Python checks, <1ms.
-    """
-    notes: list[str] = []
-
-    # ── 1. Tool-call limit warning ──
-    if tool_calls >= MAX_TOOL_CALLS:
-        notes.append(
-            f"⚠️ Hit the {MAX_TOOL_CALLS}-call limit. "
-            "The answer may be incomplete — try a more specific question."
-        )
-
-    # ── 2. Diagnose tool errors from message history ──
-    tool_issues = _diagnose_tool_history(messages) if messages else []
-
-    # ── Build final answer ──
-
-    # Case A: Good answer text exists
-    if answer and len(answer.strip()) > 20:
-        if notes or tool_issues:
-            return answer + "\n\n---\n" + "\n".join(notes + tool_issues)
-        return answer
-
-    # Case B: No answer text, but we have data rows
-    if sql_results:
-        intro = "Here are the results:"
-        if notes:
-            intro += "\n\n" + "\n".join(notes)
-        return intro
-
-    # Case C: No answer, no data — full failure explanation
-    parts = ["I wasn't able to answer your question. Here's what I found:\n"]
-
-    if tool_issues:
-        parts.extend(tool_issues)
-
-    if not tool_issues:
-        parts.append(
-            "- Could not find matching data. "
-            "Check that the relevant files are uploaded, or try rephrasing with "
-            "specific file/column names you see in the file manager."
-        )
-
-    return "\n".join(parts)
-
-
-def _diagnose_tool_history(messages: list) -> list[str]:
-    """Scan tool messages for errors and build user-facing diagnostics."""
-    issues: list[str] = []
-    missing_files: list[str] = []
-    zero_row_count = 0
-    errors: list[str] = []
-
-    for msg in messages:
-        if not isinstance(msg, ToolMessage):
-            continue
-        content = msg.content if isinstance(msg.content, str) else str(msg.content)
-
-        # File not found
-        if "No such file" in content or "does not exist" in content or "HTTP 404" in content:
-            for part in content.split("'"):
-                if "az://" in part or ".parquet" in part or ".csv" in part:
-                    missing_files.append(part.split("/")[-1])
-                    break
-
-        # Zero-row queries
-        elif '"row_count": 0' in content or '"total_rows": 0' in content:
-            zero_row_count += 1
-
-        # Generic errors
-        elif "error" in content.lower() and "sql" in content.lower():
-            # Extract just the error message, not the full blob
-            for line in content.split("\n"):
-                if "error" in line.lower():
-                    errors.append(line.strip()[:150])
-                    break
-
-    if missing_files:
-        names = ", ".join(f"**{f}**" for f in sorted(set(missing_files)))
-        issues.append(
-            f"- **File not found:** {names} — this file doesn't exist in your data. "
-            "It may have been deleted, or check the exact file name in the file manager."
-        )
-
-    if zero_row_count > 0 and not missing_files:
-        issues.append(
-            f"- **Queries returned 0 rows** ({zero_row_count} attempt{'s' if zero_row_count > 1 else ''}). "
-            "The filter or JOIN condition didn't match any data. Try asking without filters first, "
-            "or check if the column values you're filtering on actually exist."
-        )
-
-    if errors and not missing_files and not zero_row_count:
-        issues.append(f"- **SQL error:** {errors[0]}")
-
-    return issues
-
-
 # ── Public entry point ────────────────────────────────────────────────────────
 
 async def run_agent_query(query: str, db: AsyncSession, *, conversation_context: str = "") -> dict:
@@ -624,7 +514,8 @@ async def run_agent_query(query: str, db: AsyncSession, *, conversation_context:
                      answer_preview=answer[:200])
 
     # ── Validate & enrich response ──
-    answer = _validate_response(answer, sql_results, tool_calls_made, final_msgs)
+    if not answer and sql_results:
+        answer = "Here are the results:"
 
     chart = _infer_chart(answer, sql_results)
 
@@ -740,8 +631,8 @@ async def run_agent_query_stream(
                      answer_len=len(final_answer))
 
     # ── Validate & enrich response ──
-    synthetic_msgs = [ToolMessage(content=o, tool_call_id="") for o in tool_outputs]
-    final_answer = _validate_response(final_answer, sql_results, tool_calls_made, synthetic_msgs)
+    if not final_answer and sql_results:
+        final_answer = "Here are the results:"
 
     chart = _infer_chart(final_answer, sql_results)
 
