@@ -57,9 +57,31 @@ def build_catalog_tools(
     def get_file_schema(blob_path: str) -> str:
         """Get the full column schema, sample values, and data types for a specific file.
         Use this to understand exact column names and types before writing SQL."""
+        # Exact match first
         match = next((f for f in catalog if f["blob_path"] == blob_path), None)
+
+        # Fuzzy fallback: try substring match on blob_path
         if not match:
-            return json.dumps({"error": f"File '{blob_path}' not found in catalog."})
+            q = blob_path.lower()
+            match = next(
+                (f for f in catalog if q in f["blob_path"].lower() or f["blob_path"].lower() in q),
+                None,
+            )
+
+        # Fuzzy fallback: try matching against description
+        if not match:
+            match = next(
+                (f for f in catalog if q in (f.get("ai_description") or "").lower()),
+                None,
+            )
+
+        if not match:
+            available = [f["blob_path"] for f in catalog[:15]]
+            return json.dumps({
+                "error": f"File '{blob_path}' not found.",
+                "available_files": available,
+                "hint": "Use one of the blob_path values above, or call search_catalog to find the right file.",
+            })
 
         cols = []
         for c in (match.get("columns_info") or []):
@@ -71,7 +93,7 @@ def build_catalog_tools(
             })
 
         return json.dumps({
-            "blob_path": blob_path,
+            "blob_path": match["blob_path"],
             "columns": cols,
             "key_metrics": match.get("key_metrics") or [],
             "key_dimensions": match.get("key_dimensions") or [],
