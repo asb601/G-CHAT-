@@ -10,7 +10,8 @@ from starlette.config import Config
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.logger import auth_logger, db_logger
-from app.core.security import create_access_token, get_current_user
+from app.core.security import create_access_token
+from app.dependencies import get_current_user
 from app.models.user import User
 from app.schemas.auth import TokenOut, UserOut
 

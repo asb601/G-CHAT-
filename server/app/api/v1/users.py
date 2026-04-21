@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.logger import auth_logger
-from app.core.security import require_admin
+from app.dependencies import require_admin
 from app.models.file import File
 from app.models.user import User
 from app.schemas.user import UserOut

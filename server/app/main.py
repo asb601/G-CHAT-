@@ -9,14 +9,14 @@ from starlette.middleware.sessions import SessionMiddleware
 from app.core.config import get_settings
 from app.core.database import engine, Base
 from app.core.logger import upload_logger, folder_logger, container_logger, auth_logger, chat_logger
-from app.api.auth import router as auth_router
-from app.api.folders import router as folders_router
-from app.api.files import router as files_router
-from app.api.containers import router as containers_router
-from app.api.users import router as users_router
-from app.api.chat import router as chat_router
-from app.api.admin import router as admin_router
-from app.api.logs import router as logs_router
+from app.api.v1.auth import router as auth_router
+from app.api.v1.folders import router as folders_router
+from app.api.v1.files import router as files_router
+from app.api.v1.containers import router as containers_router
+from app.api.v1.users import router as users_router
+from app.api.v1.chat import router as chat_router
+from app.api.v1.admin import router as admin_router
+from app.api.v1.logs import router as logs_router
 import app.models.file  # ensure File table is created
 import app.models.container  # ensure ContainerConfig table is created
 import app.models.file_metadata  # ensure FileMetadata table is created

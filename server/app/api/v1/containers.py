@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import async_session, get_db
 from app.core.logger import container_logger, blob_logger, db_logger, ingest_logger
-from app.core.security import require_admin, get_current_user
+from app.dependencies import require_admin, get_current_user
 from app.services.ingestion_service import ingest_file
 from app.models.background_job import BackgroundJob
 from app.models.container import ContainerConfig

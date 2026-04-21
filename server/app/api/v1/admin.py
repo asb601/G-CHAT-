@@ -15,8 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.cost_tracker import get_session_summary
 from app.core.database import async_session, get_db
 from app.core.logger import ingest_logger
-from app.core.security import get_current_user, require_admin
-from app.agent.graph import invalidate_catalog_cache
+from app.dependencies import get_current_user, require_admin
+from app.agent.graph.graph import invalidate_catalog_cache
 from app.models.file import File
 from app.models.file_analytics import FileAnalytics
 from app.models.file_metadata import FileMetadata

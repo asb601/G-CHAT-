@@ -6,8 +6,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.logger import folder_logger, db_logger
-from app.core.security import get_current_user, require_admin
-from app.api.files import _file_to_out
+from app.dependencies import get_current_user, require_admin
+from app.api.v1.files import _file_to_out
 from app.models.file import File
 from app.models.folder import Folder
 from app.models.user import User

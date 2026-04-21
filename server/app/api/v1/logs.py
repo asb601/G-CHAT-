@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.logger import LOG_DIR
-from app.core.security import require_admin
+from app.dependencies import require_admin
 from app.models.background_job import BackgroundJob
 from app.models.file import File
 from app.models.file_metadata import FileMetadata
