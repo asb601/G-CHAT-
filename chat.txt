@@ -1,0 +1,90 @@
+
+=============================================================
+TOPIC: Files not accessible / prompt_builder.py fix
+=============================================================
+
+PROBLEM RECAP
+--------------
+When you ask the AI about a file, sometimes it says "no files found" or
+can't access the file even though it was ingested successfully.
+
+ROOT CAUSE
+-----------
+In prompt_builder.py → build_parquet_note(), the entire file-listing
+block is gated behind:
+
+    if parquet_paths_all:
+        ...csv_only is built inside here...
+
+If NO file has finished Parquet conversion yet → parquet_paths_all = {}
+→ this entire block is SKIPPED
+→ the agent receives an empty string for file paths
+→ it has no idea any files exist
+
+WHEN DOES THIS HIT YOU?
+------------------------
+1. You ingest a file → Parquet conversion takes minutes in background
+2. You immediately ask a question → parquet_paths_all is empty
+3. Agent says "no files found" or hallucinates
+
+Also hits when:
+- Parquet conversion failed silently
+- Server restarted mid-conversion
+
+WHAT IS FINE (doesn't need fixing)
+------------------------------------
+- catalog[] is always complete — built from FileMetadata which is
+  written in Step 3/5 of ingest (fast, synchronous)
+- Scenario B (some files have Parquet, some don't) already works:
+  csv_only list is built correctly inside the if-block
+- catalog_cache.py `if not ar: continue` is NOT the bug — it only
+  skips parquet_paths_all, not catalog itself
+
+THE FIX — prompt_builder.py only
+----------------------------------
+Current code structure:
+
+    if parquet_paths_all:
+        # build parquet list
+        csv_only = [files not in parquet_paths_all]
+        if csv_only:
+            # append csv section
+        return note
+
+    if parquet_blob_path:
+        return single-file parquet note
+
+    return ""   ← BUG: hits here when no parquet exists at all
+
+Fixed code structure:
+
+    csv_only = [all files not in parquet_paths_all]  ← move OUTSIDE the if
+
+    if parquet_paths_all:
+        # build parquet list
+        if csv_only:
+            # append csv section
+        return note
+
+    elif csv_only:                                    ← NEW branch
+        # No parquet ready yet — show all files as CSV
+        build csv_only section
+        return note
+
+    return ""
+
+WHAT CHANGES AFTER THE FIX
+----------------------------
+Before: Agent gets blank prompt when no Parquet ready → "no files found"
+After:  Agent gets CSV paths for all ingested files immediately after
+        ingest Step 3 completes (fast), upgrades to Parquet automatically
+        once conversion finishes (cache TTL = 5 min)
+
+FILES TO EDIT
+--------------
+Only 1 file: server/app/agent/prompts/prompt_builder.py
+Function:    build_parquet_note()
+
+=============================================================
+NEXT TOPIC (pending): Date-based questions ("past 7 days") failing
+=============================================================
