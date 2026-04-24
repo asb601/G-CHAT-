@@ -76,18 +76,30 @@ def build_catalog_tools(
         # Exact match first
         match = next((f for f in catalog if f["blob_path"] == blob_path), None)
 
-        # Fuzzy fallback: try substring match on blob_path
+        # Fuzzy fallback: strip az://container/ prefix and extension, then match on stem
         if not match:
             q = blob_path.lower()
+            # Strip az://container_name/ prefix if present
+            q_stem = q
+            if q_stem.startswith("az://"):
+                q_stem = q_stem.split("/", 3)[-1]  # strip az://container/
+            # Strip extension (.parquet, .csv, etc.)
+            if "." in q_stem:
+                q_stem = q_stem.rsplit(".", 1)[0]
+            # Match against catalog blob_path stems (also strip extension)
+            def _stem(bp: str) -> str:
+                s = bp.lower()
+                return s.rsplit(".", 1)[0] if "." in s else s
+
             match = next(
-                (f for f in catalog if q in f["blob_path"].lower() or f["blob_path"].lower() in q),
+                (f for f in catalog if q_stem == _stem(f["blob_path"]) or q_stem in _stem(f["blob_path"])),
                 None,
             )
 
         # Fuzzy fallback: try matching against description
         if not match:
             match = next(
-                (f for f in catalog if q in (f.get("ai_description") or "").lower()),
+                (f for f in catalog if q_stem in (f.get("ai_description") or "").lower()),
                 None,
             )
 
