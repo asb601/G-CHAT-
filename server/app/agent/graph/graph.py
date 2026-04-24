@@ -33,7 +33,7 @@ from app.agent.tools.catalog import build_catalog_tools
 from app.agent.tools.sample import build_sample_tool
 from app.agent.tools.sql import build_sql_tools
 from app.agent.tools.stats import build_stats_tool
-from app.core.logger import chat_logger
+from app.core.logger import chat_logger, pipeline_logger
 
 # Per-request mutable stores (keyed by request_id)
 _request_stores: dict[str, dict] = {}
@@ -90,6 +90,18 @@ async def _build_agent_context(
         container_name=container_name,
         sample_rows=sample_rows,
         conversation_context=conversation_context,
+    )
+
+    # ── Log the complete system prompt so we can audit exactly what the LLM sees ──
+    pipeline_logger.info(
+        "system_prompt_built",
+        query=query,
+        container=container_name,
+        catalog_file_count=len(catalog),
+        parquet_file_count=len(parquet_paths_all),
+        has_relationships=bool(relationships),
+        has_conversation_context=bool(conversation_context),
+        system_prompt=system_prompt,  # full prompt, no truncation
     )
 
     initial_state: AgentState = {
@@ -244,13 +256,66 @@ async def run_agent_query_stream(
                         answer_tokens.append(content)
                         yield {"type": "token", "content": content}
 
+            elif kind == "on_chat_model_start":
+                # Log the full message list going into the LLM for this iteration
+                raw_msgs = event["data"].get("input", {}).get("messages", [])
+                # langgraph batches messages as [[msg1, msg2, ...]]
+                flat = raw_msgs[0] if raw_msgs and isinstance(raw_msgs[0], list) else raw_msgs
+                pipeline_logger.debug(
+                    "llm_stream_input",
+                    iteration=tool_calls_made,
+                    message_count=len(flat),
+                    messages=[
+                        {
+                            "type": type(m).__name__,
+                            "content": str(m.content) if hasattr(m, "content") else "",
+                            "tool_calls": [
+                                {"name": tc.get("name"), "args": tc.get("args")}
+                                for tc in (getattr(m, "tool_calls", None) or [])
+                            ],
+                        }
+                        for m in flat
+                    ],
+                )
+
+            elif kind == "on_chat_model_end":
+                # Log the complete LLM response for this iteration
+                resp = event["data"].get("output")
+                if resp:
+                    usage = getattr(resp, "usage_metadata", None)
+                    pipeline_logger.debug(
+                        "llm_stream_output",
+                        iteration=tool_calls_made,
+                        content=str(resp.content) if resp.content else "",
+                        tool_calls=[
+                            {"name": tc.get("name"), "args": tc.get("args")}
+                            for tc in (getattr(resp, "tool_calls", None) or [])
+                        ],
+                        prompt_tokens=usage.get("input_tokens", 0) if usage else 0,
+                        completion_tokens=usage.get("output_tokens", 0) if usage else 0,
+                    )
+
             elif kind == "on_tool_start":
                 tool_name = event.get("name", "")
+                tool_input = event["data"].get("input", {})
                 tool_calls_made += 1
+                pipeline_logger.info(
+                    "tool_call_start",
+                    tool=tool_name,
+                    iteration=tool_calls_made,
+                    input=tool_input,  # full args, no truncation
+                )
                 yield {"type": "thinking", "tool": tool_name}
 
             elif kind == "on_tool_end":
+                tool_name = event.get("name", "")
                 tool_output = event["data"].get("output", "")
+                pipeline_logger.info(
+                    "tool_call_end",
+                    tool=tool_name,
+                    iteration=tool_calls_made,
+                    output=str(tool_output),  # full output, no truncation
+                )
                 if isinstance(tool_output, str):
                     files_used.update(extract_blob_paths(tool_output))
                     tool_outputs.append(tool_output)

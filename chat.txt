@@ -1,90 +1,168 @@
+HOW TO VIEW LOGS ON THE VM
+==========================
 
-=============================================================
-TOPIC: Files not accessible / prompt_builder.py fix
-=============================================================
+STEP 1 - SSH into your VM
+--------------------------
+Open a terminal on your laptop and run:
 
-PROBLEM RECAP
---------------
-When you ask the AI about a file, sometimes it says "no files found" or
-can't access the file even though it was ingested successfully.
+    ssh ubuntu@YOUR_VM_IP
 
-ROOT CAUSE
------------
-In prompt_builder.py → build_parquet_note(), the entire file-listing
-block is gated behind:
+Replace YOUR_VM_IP with the actual IP address of your VM.
+(If you use a key file add:  -i ~/.ssh/your-key.pem)
 
-    if parquet_paths_all:
-        ...csv_only is built inside here...
+Example:
+    ssh ubuntu@20.123.45.67
 
-If NO file has finished Parquet conversion yet → parquet_paths_all = {}
-→ this entire block is SKIPPED
-→ the agent receives an empty string for file paths
-→ it has no idea any files exist
 
-WHEN DOES THIS HIT YOU?
-------------------------
-1. You ingest a file → Parquet conversion takes minutes in background
-2. You immediately ask a question → parquet_paths_all is empty
-3. Agent says "no files found" or hallucinates
-
-Also hits when:
-- Parquet conversion failed silently
-- Server restarted mid-conversion
-
-WHAT IS FINE (doesn't need fixing)
-------------------------------------
-- catalog[] is always complete — built from FileMetadata which is
-  written in Step 3/5 of ingest (fast, synchronous)
-- Scenario B (some files have Parquet, some don't) already works:
-  csv_only list is built correctly inside the if-block
-- catalog_cache.py `if not ar: continue` is NOT the bug — it only
-  skips parquet_paths_all, not catalog itself
-
-THE FIX — prompt_builder.py only
+STEP 2 - Go to the server folder
 ----------------------------------
-Current code structure:
+    cd /home/ubuntu/G-CHAT/server
 
-    if parquet_paths_all:
-        # build parquet list
-        csv_only = [files not in parquet_paths_all]
-        if csv_only:
-            # append csv section
-        return note
+(The exact path depends on where you deployed. If unsure run:  find / -name "pipeline.log" 2>/dev/null)
 
-    if parquet_blob_path:
-        return single-file parquet note
 
-    return ""   ← BUG: hits here when no parquet exists at all
+STEP 3 - Watch live logs as queries come in
+--------------------------------------------
+This is the main one. Run it, then go send a query in the app and
+watch exactly what the agent does step by step:
 
-Fixed code structure:
+    tail -f logs/pipeline.log
 
-    csv_only = [all files not in parquet_paths_all]  ← move OUTSIDE the if
+Press Ctrl+C to stop.
 
-    if parquet_paths_all:
-        # build parquet list
-        if csv_only:
-            # append csv section
-        return note
+What you will see:
+  - SYSTEM PROMPT built for that query
+  - LLM OUTPUT  - what tool it decided to call (e.g. run_sql)
+  - SQL QUERY   - the exact SQL it wrote
+  - SQL RESULT  - how many rows came back and a preview table
+  - Final ANSWER the LLM generated
 
-    elif csv_only:                                    ← NEW branch
-        # No parquet ready yet — show all files as CSV
-        build csv_only section
-        return note
 
-    return ""
+STEP 4 - See the last 50 events (no live follow)
+-------------------------------------------------
+    tail -50 logs/pipeline.log
 
-WHAT CHANGES AFTER THE FIX
-----------------------------
-Before: Agent gets blank prompt when no Parquet ready → "no files found"
-After:  Agent gets CSV paths for all ingested files immediately after
-        ingest Step 3 completes (fast), upgrades to Parquet automatically
-        once conversion finishes (cache TTL = 5 min)
 
-FILES TO EDIT
---------------
-Only 1 file: server/app/agent/prompts/prompt_builder.py
-Function:    build_parquet_note()
+STEP 5 - See only the SQL queries that were run
+------------------------------------------------
+    grep "sql_execute_start" logs/pipeline.log
 
-=============================================================
-NEXT TOPIC (pending): Date-based questions ("past 7 days") failing
-=============================================================
+
+STEP 6 - See only errors
+-------------------------
+    grep "error" logs/pipeline.log
+
+
+THAT IS IT.
+The log file is always at:   server/logs/pipeline.log
+tail -f  = live follow (stays open)
+tail -50 = last 50 lines (exits immediately)
+Ctrl+C   = stop any running command
+
+---
+
+WHY STORAGE DOES NOT DOUBLE
+-----------------------------
+
+Parquet is a compressed columnar format. CSVs are plain text.
+Every repeated string, every integer, every "N/A" is stored as raw characters in CSV.
+Parquet with ZSTD compression eliminates all of that redundancy.
+
+Compression ratios on typical enterprise data:
+
+  CSV (plain text)        100 MB
+  Parquet (ZSTD)           15-25 MB   (75-85% smaller)
+
+Enterprise data compresses well because it has lots of repeated strings
+(department names, status codes, country codes), long runs of similar
+integers (employee IDs, years), and sparse columns (many nulls).
+
+REALISTIC STORAGE MATH FOR 1M FILES:
+
+  Average enterprise file: ~50 MB (mix of small reports + large exports)
+  1M files x 50 MB = 50 TB in client's Azure Blob (their cost, not ours)
+
+  Our Parquet store: 50 TB x 0.2 = ~10 TB
+  Azure Blob Warm tier at 10 TB = roughly $180-200/month
+
+  That is 0.2x the original size, not 2x.
+
+For files > 500 MB, we generate a SUMMARY Parquet (daily rollup aggregates)
+instead of a full conversion. A 2 GB CSV becomes a ~50 MB summary Parquet.
+Full data stays in the client's blob. We never replicate it.
+
+---
+
+WHERE EACH COPY LIVES
+
+  Client's Azure Blob  -->  original files (CSV, Excel, TXT)
+                            Their storage account. We only READ from it.
+                            We never copy raw files to our storage.
+
+  Our Azure Blob       -->  Parquet files only
+                            ~10 TB at 1M files, not 50 TB.
+
+  Our Postgres (Neon)  -->  metadata, embeddings, permissions, analytics
+                            Text data. ~500 GB at 1M files with vectors.
+
+We do NOT hold originals AND Parquets. Only Parquets on our side.
+
+---
+
+IS CONVERSION SPEED FEASIBLE?
+
+DuckDB conversion speed:
+  100 MB CSV   --> Parquet:  ~2-3 seconds
+  1 GB CSV     --> Parquet:  ~20-30 seconds
+  Average 50 MB file:        ~1-2 seconds
+
+Single worker, serial, 1M files x 1.5s = ~17 days. Sounds bad.
+
+But that is not how it works:
+
+1. Files are not all uploaded on day 1.
+   Clients upload gradually (daily exports, weekly reports).
+   Workers process as files arrive. No backlog builds up.
+
+2. For an initial bulk import, we run multiple async workers.
+   20 workers x 1.5s average = 1M files in ~21 hours.
+   Workers are cheap -- spin up Azure Container Instances, done.
+
+3. Users do not wait for ingestion.
+   File shows as "Processing" in the UI once upload is done.
+   Becomes queryable when ingestion completes. Chat never blocked.
+
+4. Failures are isolated.
+   One corrupt file fails. The other 999,999 process normally.
+
+---
+
+INITIAL BULK IMPORT PLAN (if client already has 1M files)
+
+  Phase 1 (fast):        Scan file names, sizes, types.
+                         Register all 1M in DB within a few hours.
+                         Files visible in file manager immediately.
+
+  Phase 2 (background):  Convert + profile + embed.
+                         1-2 days with 20-30 workers.
+                         Files become queryable as each one finishes.
+
+This is exactly how AWS Glue and Databricks Unity Catalog handle
+initial registration. Register fast, process progressively.
+
+---
+
+SUMMARY
+
+  Storage doubles?         No. Parquets are 5x smaller than CSVs.
+                           Our total store = ~20% of original file sizes.
+
+  Conversion time?         Background job. 20 workers = 1M files in ~21 hours
+                           for bulk import. Normal uploads: as they arrive.
+
+  Client's data at risk?   Zero. We never write to their blob.
+                           Originals completely untouched.
+
+  Is it worth it?          Yes. Without Parquet, a DuckDB query on a 2 GB CSV
+                           takes minutes. With Parquet, under 2 seconds.
+                           The entire 1M-file architecture depends on this.

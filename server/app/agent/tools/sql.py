@@ -8,11 +8,12 @@ Key properties:
 from __future__ import annotations
 
 import json
+import time
 
 from langchain_core.tools import tool
 
 from app.core.duckdb_client import execute_query_sync
-from app.core.logger import chat_logger
+from app.core.logger import chat_logger, pipeline_logger
 
 
 def build_sql_tools(
@@ -36,12 +37,30 @@ def build_sql_tools(
             if bad in sql_upper:
                 return json.dumps({"error": f"DML statement not allowed: {bad.strip()}"})
 
+        # ── Log the complete SQL before execution ──────────────────────────────
+        pipeline_logger.info("sql_execute_start", sql=sql)
+
+        t_exec = time.perf_counter()
         try:
             rows, total = execute_query_sync(sql, connection_string)
+            duration_ms = round((time.perf_counter() - t_exec) * 1000, 2)
+
+            # ── Log full result: columns + first 20 rows + timing ──────────────
+            pipeline_logger.info(
+                "sql_execute_done",
+                sql=sql,
+                duration_ms=duration_ms,
+                rows_returned=len(rows),
+                total_rows=total,
+                columns=list(rows[0].keys()) if rows else [],
+                preview_rows=rows[:20],  # first 20 rows in the log
+            )
+
             chat_logger.info("run_sql_result",
-                             sql_preview=sql[:200],
+                             sql_preview=sql[:300],
                              rows_returned=len(rows),
-                             total_rows=total)
+                             total_rows=total,
+                             duration_ms=duration_ms)
 
             state_store["sql_results"] = rows
             preview = rows[:5]
@@ -58,6 +77,13 @@ def build_sql_tools(
                 )
             return json.dumps(resp, default=str)
         except Exception as exc:
+            duration_ms = round((time.perf_counter() - t_exec) * 1000, 2)
+            pipeline_logger.error(
+                "sql_execute_error",
+                sql=sql,
+                duration_ms=duration_ms,
+                error=str(exc),  # full error, no truncation
+            )
             return json.dumps({"error": str(exc)[:500]})
 
     return [run_sql]

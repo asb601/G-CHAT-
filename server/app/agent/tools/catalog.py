@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 from langchain_core.tools import tool
 
+from app.core.logger import pipeline_logger
+
 
 def build_catalog_tools(
     catalog: list[dict],
@@ -63,6 +65,14 @@ def build_catalog_tools(
                 for f in catalog[:10]
             ]
 
+        pipeline_logger.info(
+            "search_catalog",
+            query=query,
+            files_found=len(results),
+            matched_files=[r["blob_path"] for r in results],
+            result_descriptions=[r.get("description", "")[:120] for r in results],
+        )
+
         return json.dumps({"files": results, "total": len(results)}, default=str)
 
     @tool
@@ -89,6 +99,12 @@ def build_catalog_tools(
 
         if not match:
             available = [f["blob_path"] for f in catalog[:15]]
+            pipeline_logger.info(
+                "get_file_schema",
+                blob_path=blob_path,
+                found=False,
+                available_files=available,
+            )
             return json.dumps({
                 "error": f"File '{blob_path}' not found.",
                 "available_files": available,
@@ -103,6 +119,17 @@ def build_catalog_tools(
                 "sample_values": c.get("sample_values", [])[:5],
                 "unique_count": len(c.get("unique_values", [])),
             })
+
+        pipeline_logger.info(
+            "get_file_schema",
+            blob_path=blob_path,
+            resolved_blob_path=match["blob_path"],
+            found=True,
+            column_count=len(cols),
+            columns=[c["name"] for c in cols],
+            column_types={c["name"]: c["type"] for c in cols},
+            sample_values={c["name"]: c["sample_values"] for c in cols},
+        )
 
         return json.dumps({
             "blob_path": match["blob_path"],

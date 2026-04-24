@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 from langchain_core.tools import tool
 
+from app.core.logger import pipeline_logger
+
 
 def build_sample_tool(sample_rows: list[dict]) -> list:
     """Return a tool that previews ingest-time sample rows for schema understanding."""
@@ -17,11 +19,21 @@ def build_sample_tool(sample_rows: list[dict]) -> list:
         These rows are from the beginning of the file only — do NOT use them as the answer
         to the user's question. Always run SQL on the parquet for actual results."""
         if not sample_rows:
+            pipeline_logger.info("inspect_data_format", n=n, available=False)
             return json.dumps({"error": "No sample rows available."})
 
         n = max(1, min(n, 20))
+        rows = sample_rows[:n]
+        pipeline_logger.info(
+            "inspect_data_format",
+            n=n,
+            available=True,
+            total_sample_rows=len(sample_rows),
+            columns=list(rows[0].keys()) if rows else [],
+            rows=rows,
+        )
         return json.dumps({
-            "format_preview": sample_rows[:n],
+            "format_preview": rows,
             "note": "These are example rows for understanding data format only. Use run_sql on the parquet path for real answers.",
         }, default=str)
 

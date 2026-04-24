@@ -7,6 +7,8 @@ from typing import Any
 import pandas as pd
 from langchain_core.tools import tool
 
+from app.core.logger import pipeline_logger
+
 
 def build_stats_tool(state_store: dict) -> list:
     """Return summarise_dataframe tool bound to the request's state store."""
@@ -17,6 +19,11 @@ def build_stats_tool(state_store: dict) -> list:
         focus: optional comma-separated column names to focus on.
         Returns counts, means, top-values, nulls for numeric+categorical columns."""
         rows = state_store.get("sql_results", [])
+        pipeline_logger.info(
+            "summarise_dataframe_start",
+            focus=focus or "(all columns)",
+            rows_in_memory=len(rows),
+        )
         if not rows:
             return json.dumps({"error": "No SQL result in memory. Call run_sql first."})
 
@@ -48,6 +55,14 @@ def build_stats_tool(state_store: dict) -> list:
                 col_info["top_values"] = {str(k): int(v) for k, v in vc.items()}
                 col_info["unique_count"] = int(df[col].nunique())
             summary["columns"][col] = col_info
+
+        pipeline_logger.info(
+            "summarise_dataframe_done",
+            focus=focus or "(all columns)",
+            row_count=summary["row_count"],
+            column_count=summary["column_count"],
+            columns_summary=summary["columns"],
+        )
 
         return json.dumps(summary, default=str)
 

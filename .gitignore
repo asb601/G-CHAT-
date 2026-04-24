@@ -8,7 +8,9 @@ git clone https://github.com/asb601/G-CHAT-.git# Environment variables — never
 *.p12
 *.pfx
 server/uploads/
-
+*.dmg
+*.txt
+*.csv 
 # macOS
 .DS_Store
 .AppleDouble

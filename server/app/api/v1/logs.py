@@ -1,24 +1,28 @@
 """
 Logs API — stream log files from the server for debugging.
 
-GET /api/logs/files           → list available log files
-GET /api/logs/{filename}      → tail N lines from a log file
-GET /api/logs/{filename}/search?q=...  → search a log file
-GET /api/logs/file-timings    → upload + ingestion + parquet timing per file
+GET  /api/logs/files                    → list available log files
+GET  /api/logs/{filename}               → tail N lines from a log file
+GET  /api/logs/{filename}/search?q=...  → search a log file
+GET  /api/logs/file-timings             → upload + ingestion + parquet timing per file
+GET  /api/logs/pipeline/tail?n=100      → last N pipeline events, pretty-formatted plain text
+GET  /api/logs/pipeline/stream          → SSE live stream of pipeline events (pretty-formatted)
 
 Auth: admin only (ADMIN_EMAIL from settings).
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.logger import LOG_DIR
+from app.core.logger import LOG_DIR, format_pipeline_line
 from app.dependencies import require_admin
 from app.models.background_job import BackgroundJob
 from app.models.file import File
@@ -28,7 +32,7 @@ from app.models.user import User
 router = APIRouter(prefix="/logs", tags=["logs"])
 
 # Only allow reading known log files — prevent path traversal
-_ALLOWED_FILES = {"system.log", "ai_pipeline.log", "llm_calls.log", "costs.log"}
+_ALLOWED_FILES = {"system.log", "ai_pipeline.log", "llm_calls.log", "costs.log", "pipeline.log"}
 
 
 def _safe_log_path(filename: str) -> Path:
@@ -42,6 +46,175 @@ def _safe_log_path(filename: str) -> Path:
         raise HTTPException(status_code=404, detail=f"Log file not found: {clean}")
     return path
 
+
+# ── Pipeline-specific endpoints ─────────────────────────────────────────────
+
+@router.get("/pipeline/tail")
+async def pipeline_tail(
+    n: int = Query(default=100, ge=1, le=2000),
+    _: User = Depends(require_admin),
+) -> StreamingResponse:
+    """Return the last N pipeline events as pretty-formatted plain text.
+
+    Hit this in a browser or with curl when you can't watch the server terminal:
+        curl https://your-vm/api/v1/logs/pipeline/tail?n=50
+    """
+    path = LOG_DIR / "pipeline.log"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="pipeline.log not found — no queries yet?")
+
+    raw_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    tail_lines = [l for l in raw_lines if l.strip()][-n:]
+
+    formatted = []
+    for line in tail_lines:
+        formatted.append(format_pipeline_line(line))
+
+    body = "\n".join(formatted) + "\n"
+    return StreamingResponse(
+        iter([body]),
+        media_type="text/plain; charset=utf-8",
+    )
+
+
+@router.get("/pipeline/stream")
+async def pipeline_stream(
+    _: User = Depends(require_admin),
+) -> StreamingResponse:
+    """Live SSE stream of pipeline events, pretty-formatted.
+
+    Equivalent to 'tail -f pipeline.log' but accessible over HTTP without SSH:
+        curl -N https://your-vm/api/v1/logs/pipeline/stream
+
+    Keeps the connection open and pushes new events as they arrive (0.3 s poll).
+    Press Ctrl+C to stop.
+    """
+    path = LOG_DIR / "pipeline.log"
+
+    async def _event_generator():
+        # Yield a keepalive comment immediately so curl confirms connection
+        yield ": connected to pipeline stream\n\n"
+
+        # Open file and seek to end — only stream NEW events from this point
+        def _open_at_end():
+            f = open(path, "r", encoding="utf-8", errors="replace")  # noqa: WPS515
+            f.seek(0, 2)
+            return f
+
+        if not path.is_file():
+            yield "data: [pipeline.log not found — no queries yet]\n\n"
+            return
+
+        f = await asyncio.to_thread(_open_at_end)
+        try:
+            while True:
+                line = await asyncio.to_thread(f.readline)
+                if line and line.strip():
+                    pretty = format_pipeline_line(line)
+                    # SSE: each line of the block becomes a separate data: field
+                    sse_lines = "\n".join(
+                        f"data: {l}" for l in pretty.splitlines()
+                    )
+                    yield f"{sse_lines}\n\n"
+                else:
+                    # No new data — send keepalive comment every 0.3 s
+                    await asyncio.sleep(0.3)
+                    yield ": heartbeat\n\n"
+        finally:
+            await asyncio.to_thread(f.close)
+
+    return StreamingResponse(
+        _event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # tell nginx not to buffer SSE
+        },
+    )
+
+
+# ── Generic log file endpoints ────────────────────────────────────────────────
+
+# ── Pipeline-specific endpoints ──────────────────────────────────────────────
+
+@router.get("/pipeline/tail")
+async def pipeline_tail(
+    n: int = Query(default=100, ge=1, le=2000),
+    _: User = Depends(require_admin),
+) -> StreamingResponse:
+    """Return the last N pipeline events as pretty-formatted plain text.
+
+    Hit this in a browser or with curl when you can't watch the server terminal:
+        curl https://your-vm/api/v1/logs/pipeline/tail?n=50
+    """
+    path = LOG_DIR / "pipeline.log"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="pipeline.log not found — no queries received yet.")
+
+    raw_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    tail_lines = [l for l in raw_lines if l.strip()][-n:]
+
+    body = "\n".join(format_pipeline_line(line) for line in tail_lines) + "\n"
+    return StreamingResponse(
+        iter([body]),
+        media_type="text/plain; charset=utf-8",
+    )
+
+
+@router.get("/pipeline/stream")
+async def pipeline_stream(
+    _: User = Depends(require_admin),
+) -> StreamingResponse:
+    """Live SSE stream of pipeline events, pretty-formatted.
+
+    Equivalent to 'tail -f pipeline.log' but accessible over HTTP without SSH:
+        curl -N https://your-vm/api/v1/logs/pipeline/stream
+
+    Keeps the connection open and pushes new events as they arrive (polling every 0.3 s).
+    Press Ctrl+C to stop.
+    """
+    path = LOG_DIR / "pipeline.log"
+
+    async def _event_generator():
+        # Confirm connection immediately
+        yield ": connected to pipeline stream\n\n"
+
+        if not path.is_file():
+            yield "data: [pipeline.log not found — no queries received yet]\n\n"
+            return
+
+        # Seek to end — only stream new events from this point forward
+        def _open_at_end():
+            f = open(path, "r", encoding="utf-8", errors="replace")
+            f.seek(0, 2)
+            return f
+
+        f = await asyncio.to_thread(_open_at_end)
+        try:
+            while True:
+                line = await asyncio.to_thread(f.readline)
+                if line and line.strip():
+                    pretty = format_pipeline_line(line)
+                    # SSE multi-line: each text line becomes a separate data: field
+                    sse_block = "\n".join(f"data: {l}" for l in pretty.splitlines())
+                    yield f"{sse_block}\n\n"
+                else:
+                    await asyncio.sleep(0.3)
+                    yield ": heartbeat\n\n"  # keep connection alive through proxies
+        finally:
+            await asyncio.to_thread(f.close)
+
+    return StreamingResponse(
+        _event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # tell nginx/caddy not to buffer SSE
+        },
+    )
+
+
+# ── Generic log file endpoints ─────────────────────────────────────────────────
 
 @router.get("/files")
 async def list_log_files(_: User = Depends(require_admin)) -> dict:

@@ -14,7 +14,27 @@ from openai import RateLimitError
 
 from app.agent.llm import get_llm
 from app.agent.state import AgentState, MAX_TOOL_CALLS
-from app.core.logger import llm_logger
+from app.core.logger import llm_logger, pipeline_logger
+
+
+def _fmt_message(m) -> dict:
+    """Serialize a LangChain message for pipeline logging."""
+    content = m.content if hasattr(m, "content") else ""
+    tool_calls = [
+        {"name": tc.get("name"), "args": tc.get("args")}
+        for tc in (getattr(m, "tool_calls", None) or [])
+    ]
+    # For ToolMessage, also capture the tool output
+    tool_call_id = getattr(m, "tool_call_id", None)
+    base = {
+        "type": type(m).__name__,
+        "content": str(content),  # no truncation — full content to pipeline.log
+    }
+    if tool_calls:
+        base["tool_calls"] = tool_calls
+    if tool_call_id:
+        base["tool_call_id"] = tool_call_id
+    return base
 
 _MAX_LLM_RETRIES = 3
 _RETRY_BASE_DELAY = 5  # seconds, doubles each retry
@@ -29,6 +49,14 @@ def build_agent_node(all_tools: list):
             return {"messages": [AIMessage(content="I've gathered enough data. Let me summarise.")]}
 
         llm_with_tools = get_llm().bind_tools(all_tools)
+
+        # ── Log every message going into the LLM this iteration ──────────────
+        pipeline_logger.debug(
+            "llm_input",
+            iteration=count + 1,
+            message_count=len(state["messages"]),
+            messages=[_fmt_message(m) for m in state["messages"]],
+        )
 
         last_exc: Exception | None = None
         for attempt in range(_MAX_LLM_RETRIES + 1):
@@ -61,6 +89,22 @@ def build_agent_node(all_tools: list):
         usage = getattr(response, "usage_metadata", None)
         p_tok = usage.get("input_tokens", 0) if usage else 0
         c_tok = usage.get("output_tokens", 0) if usage else 0
+
+        # ── Log the full LLM response: content + every tool call with full args ──
+        tool_calls_out = getattr(response, "tool_calls", None) or []
+        pipeline_logger.debug(
+            "llm_output",
+            iteration=count + 1,
+            prompt_tokens=p_tok,
+            completion_tokens=c_tok,
+            duration_ms=duration_ms,
+            content=str(response.content) if response.content else "",
+            tool_calls=[
+                {"name": tc.get("name"), "args": tc.get("args")}
+                for tc in tool_calls_out
+            ],
+        )
+
         llm_logger.info("llm_call",
                         function="agent_node",
                         model=get_llm().deployment_name,
@@ -68,7 +112,7 @@ def build_agent_node(all_tools: list):
                         completion_tokens=c_tok,
                         total_tokens=p_tok + c_tok,
                         duration_ms=duration_ms,
-                        tool_calls=len(getattr(response, "tool_calls", []) or []),
+                        tool_calls=len(tool_calls_out),
                         iteration=count + 1,
                         retries=attempt)
 
