@@ -96,7 +96,7 @@ async def _build_agent_context(
     if user_id:
         try:
             retrieved_with_scores = await retrieve_with_scores(
-                query, user_id, is_admin, db, top_k=20
+                query, user_id, is_admin, db, top_k=8
             )
         except Exception as exc:
             chat_logger.warning("retrieval_error_fallback", error=str(exc)[:200])

@@ -27,6 +27,7 @@ Container: {container_name}
 - Write complete SQL with proper column names from above. Do not guess column names.
 - ALWAYS honour the exact count the user asks for. "top 20" means LIMIT 20, "top 50" means LIMIT 50. Default LIMIT 100 if no count specified. NEVER return fewer rows than requested unless the data genuinely has fewer.
 - For multi-file questions, run a separate run_sql per file and synthesize the answers.
+- DuckDB date arithmetic: always use `datediff('day', start_date, end_date)` — NEVER `datediff(date1, date2)` (2-arg form does not exist in DuckDB). For timestamps cast first: `datediff('day', col::DATE, current_date)`.
 - Give a direct answer with actual data. Bold the key numbers. Show ALL rows returned by the query, not a subset.
 - Max {max_calls} tool calls.
 """
