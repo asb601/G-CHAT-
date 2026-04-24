@@ -15,21 +15,20 @@ Container: {container_name}
 {sample_note}
 
 --- TOOLS ---
-1. run_sql: Execute any DuckDB SQL. File paths and column names are listed above.
-2. search_catalog: Find which file(s) to query when the paths above don't cover the question.
-3. get_file_schema: Get full column names, types, and sample values for a specific file.
-4. inspect_data_format: Preview a few rows to check value formats (e.g. date format, casing) before writing SQL. Not for answering — use run_sql.
-5. summarise_dataframe: Compute stats on the last run_sql result in memory.
+1. run_sql: Execute any DuckDB SQL query.
+2. get_file_schema: Get the EXACT column names, data types, and sample values for a file by blob_path. Call this before writing any SQL.
+3. search_catalog: Discover which file(s) match the question when the list above is unclear.
+4. inspect_data_format: Preview rows to check value formats (date format, STATUS casing, etc). Not for answering.
+5. summarise_dataframe: Compute stats on the last run_sql result.
 
 --- RULES ---
-- If file paths and columns are listed above, use them directly in run_sql. No need for search_catalog or get_file_schema.
-- BEFORE writing SQL, identify which file best matches the question. Match on file name AND description — e.g. "receipts" → a file with "RECEIPT" or "RECEIVABLE" in the name, "invoices" → "INVOICE" or "TRX", etc.
-- Write complete SQL with proper column names from above. Do not guess column names.
-- ALWAYS honour the exact count the user asks for. "top 20" means LIMIT 20, "top 50" means LIMIT 50. Default LIMIT 100 if no count specified. NEVER return fewer rows than requested unless the data genuinely has fewer.
-- For multi-file questions, run a separate run_sql per file and synthesize the answers.
-- DuckDB date arithmetic: always use `datediff('day', start_date, end_date)` — NEVER `datediff(date1, date2)` (2-arg form does not exist in DuckDB). For timestamps cast first: `datediff('day', col::DATE, current_date)`.
-- Give a direct answer with actual data. Bold the key numbers. Show ALL rows returned by the query, not a subset.
-- Max {max_calls} tool calls.
+- STEP 1 — Pick file(s): From the file list above, identify which file(s) match the question by name and description.
+- STEP 2 — Get schema: Call get_file_schema(blob_path) for EVERY file you plan to query. Use the EXACT column names it returns. NEVER guess or assume column names — they differ per file.
+- STEP 3 — Write SQL: Use only the column names from get_file_schema. You can call get_file_schema for multiple files in parallel.
+- ALWAYS honour the exact count the user asks for. "top 20" means LIMIT 20. Default LIMIT 100 if unspecified.
+- DuckDB date arithmetic: always use `datediff('day', start_date, end_date)` — NEVER `datediff(date1, date2)` (2-arg form does not exist). For timestamps: `datediff('day', col::DATE, current_date)`.
+- Give a direct answer with actual data. Bold key numbers. Show ALL rows returned.
+- Max {max_calls} tool calls total.
 """
 
 
@@ -53,36 +52,12 @@ def build_parquet_note(
             entry = catalog_by_blob.get(blob)
             cols_info = (entry.get("columns_info") or []) if entry else []
 
-            if cols_info:
-                col_names = [c["name"] for c in cols_info]
-                line += f"\n    Columns: {', '.join(col_names)}"
-
-                identifiers = []
-                enums = []
-                for c in cols_info:
-                    uv = c.get("unique_values") or c.get("sample_values") or []
-                    name_lower = c["name"].lower()
-                    col_type = c.get("type", "")
-                    n_unique = len(uv)
-
-                    is_id_like = any(
-                        name_lower.endswith(s)
-                        for s in ("_id", "_key", "_number", "_code")
-                    )
-                    if is_id_like and n_unique > 5:
-                        sample_str = ", ".join(str(v) for v in uv[:5])
-                        identifiers.append(f"{c['name']} ({col_type}, e.g. {sample_str})")
-                    elif 1 <= n_unique <= 10 and "datetime" not in col_type.lower():
-                        enums.append(f"{c['name']} [{', '.join(str(v) for v in uv)}]")
-
-                if identifiers:
-                    line += f"\n    Identifiers: {'; '.join(identifiers)}"
-                if enums:
-                    line += f"\n    Enums: {'; '.join(enums[:8])}"
-
             desc = entry.get("ai_description") if entry else None
             if desc:
                 line += f"\n    Description: {desc}"
+            good_for = (entry.get("good_for") or []) if entry else []
+            if good_for:
+                line += f"\n    Good for: {', '.join(good_for[:5])}"
             lines.append(line)
 
         note = (
@@ -98,13 +73,12 @@ def build_parquet_note(
             for entry in csv_only:
                 bp = entry["blob_path"]
                 csv_line = f"  read_csv_auto('az://{container_name}/{bp}', sample_size=500, null_padding=true, ignore_errors=true)"
-                cols_info = entry.get("columns_info") or []
-                if cols_info:
-                    col_names = [c["name"] for c in cols_info]
-                    csv_line += f"\n    Columns: {', '.join(col_names)}"
                 desc = entry.get("ai_description")
                 if desc:
                     csv_line += f"\n    Description: {desc}"
+                good_for = entry.get("good_for") or []
+                if good_for:
+                    csv_line += f"\n    Good for: {', '.join(good_for[:5])}"
                 csv_lines.append(csv_line)
             note += (
                 "\n\nCSV-only files (no parquet — may be slower for large files):\n"

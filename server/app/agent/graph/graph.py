@@ -116,14 +116,30 @@ async def _build_agent_context(
             top_scores=[(meta.file_id, round(s, 4)) for meta, s in retrieved_with_scores[:5]],
         )
     else:
-        # Fallback: no retrieval results or no user_id — use full catalog
-        catalog = full_catalog
-        parquet_paths_all = all_parquet_paths
+        # Fallback: retrieval returned 0 — do in-memory keyword match on catalog
+        # so we still show at most top_k=8 files, not all 27.
+        q_words = [w for w in query.lower().split() if len(w) > 2]
+
+        def _score(e: dict) -> int:
+            text = " ".join([
+                e.get("blob_path", ""),
+                e.get("ai_description", "") or "",
+                " ".join(e.get("good_for", []) or []),
+            ]).lower()
+            return sum(1 for w in q_words if w in text)
+
+        scored = sorted(full_catalog, key=_score, reverse=True)
+        catalog = scored[:8]
+        parquet_paths_all = {
+            k: v for k, v in all_parquet_paths.items()
+            if k in {e.get("blob_path") for e in catalog}
+        }
         pipeline_logger.info(
             "retrieval_fallback",
             query=query,
             reason="no retrieval results" if user_id else "no user_id",
             total_files=len(full_catalog),
+            fallback_files=[e.get("blob_path") for e in catalog],
         )
 
     # Per-request state store
