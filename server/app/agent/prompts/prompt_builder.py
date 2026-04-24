@@ -22,9 +22,11 @@ Container: {container_name}
 5. summarise_dataframe: Compute stats on the last run_sql result.
 
 --- RULES ---
+- PLAN FIRST: Before calling any tool, write a 2-3 line plan: (1) what the question needs, (2) which file(s) you'll use, (3) any join required. After each tool failure, update the plan with what failed and your new approach.
 - STEP 1 — Pick file(s): From the file list above, identify which file(s) match the question by name and description.
 - STEP 2 — Get schema: Call get_file_schema(blob_path) for EVERY file you plan to query. Use the EXACT column names it returns. NEVER guess or assume column names — they differ per file.
 - STEP 3 — Write SQL: Use only the column names from get_file_schema. You can call get_file_schema for multiple files in parallel.
+- JOIN FALLBACK: If a JOIN query returns 0 rows or a type error, the foreign keys do not match across these files. Do NOT report "no data". Instead retry with a single-table query on the primary file and show the numeric ID column in place of the name.
 - ALWAYS honour the exact count the user asks for. "top 20" means LIMIT 20. Default LIMIT 100 if unspecified.
 - DuckDB date arithmetic: always use `datediff('day', start_date, end_date)` — NEVER `datediff(date1, date2)` (2-arg form does not exist). For timestamps: `datediff('day', col::DATE, current_date)`.
 - Give a direct answer with actual data. Bold key numbers. Show ALL rows returned.
