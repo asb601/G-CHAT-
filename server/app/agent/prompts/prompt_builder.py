@@ -1,6 +1,6 @@
 """
 System prompt builder — assembles the prompt from catalog data,
-parquet paths, relationships, and conversation context.
+parquet paths, and conversation context.
 """
 from __future__ import annotations
 
@@ -26,10 +26,7 @@ Container: {container_name}
 - BEFORE writing SQL, identify which file best matches the question. Match on file name AND description — e.g. "receipts" → a file with "RECEIPT" or "RECEIVABLE" in the name, "invoices" → "INVOICE" or "TRX", etc.
 - Write complete SQL with proper column names from above. Do not guess column names.
 - ALWAYS honour the exact count the user asks for. "top 20" means LIMIT 20, "top 50" means LIMIT 50. Default LIMIT 100 if no count specified. NEVER return fewer rows than requested unless the data genuinely has fewer.
-- For multi-file questions, prefer JOINs.
-- Always check the JOIN RELATIONSHIPS section before writing any JOIN. Use the exact column name listed. Never guess JOIN columns.
-- If two files need to be JOINed but NO relationship is listed for them, call get_file_schema on BOTH files first.
-- If a JOIN returns 0 rows — stop immediately. Call get_file_schema on both files to verify the exact column names and types, then rewrite the JOIN once with the correct columns.
+- For multi-file questions, run a separate run_sql per file and synthesize the answers.
 - Give a direct answer with actual data. Bold the key numbers. Show ALL rows returned by the query, not a subset.
 - Max {max_calls} tool calls.
 """
@@ -124,64 +121,8 @@ def build_parquet_note(
     return ""
 
 
-def build_join_note(
-    relationships: list[dict],
-    parquet_paths_all: dict[str, str],
-    container_name: str,
-) -> str:
-    """Build the JOIN relationships section of the system prompt."""
-    usable_rels = [r for r in relationships if r.get("confidence_score", 0) >= 0.7]
-    if not usable_rels or not parquet_paths_all:
-        return ""
-
-    seen_pairs: set[tuple[str, str, str]] = set()
-    pair_counts: dict[tuple[str, str], int] = {}
-    join_lines = []
-
-    for rel in sorted(usable_rels, key=lambda r: r["confidence_score"], reverse=True):
-        a_path, b_path = rel["file_a_path"], rel["file_b_path"]
-        pair_key = (min(a_path, b_path), max(a_path, b_path))
-        col_key = (*pair_key, rel["shared_column"])
-        if col_key in seen_pairs:
-            continue
-        seen_pairs.add(col_key)
-
-        if pair_counts.get(pair_key, 0) >= 3:
-            continue
-        pair_counts[pair_key] = pair_counts.get(pair_key, 0) + 1
-
-        pq_a = parquet_paths_all.get(a_path)
-        pq_b = parquet_paths_all.get(b_path)
-        if pq_a and pq_b:
-            shared = rel["shared_column"]
-            if "=" in shared:
-                col_a, col_b = shared.split("=", 1)
-                join_on = f"a.{col_a} = b.{col_b}"
-            else:
-                join_on = shared
-            join_lines.append(
-                f"  az://{container_name}/{pq_a}  ←→  az://{container_name}/{pq_b}\n"
-                f"  JOIN ON: {join_on}\n"
-                f"  Type: {rel.get('join_type', 'LEFT JOIN')}  "
-                f"Confidence: {rel['confidence_score']}"
-            )
-        if len(join_lines) >= 30:
-            break
-
-    if not join_lines:
-        return ""
-
-    return (
-        "\n--- JOIN RELATIONSHIPS (use these exact column names) ---\n"
-        "These files share columns and can be JOINed directly:\n"
-        + "\n".join(join_lines)
-        + "\nAlways use these exact column names when writing JOIN conditions.\n"
-    )
-
-
 def build_system_prompt(
     catalog: list[dict],
-    relationships: list[dict],
     parquet_paths_all: dict[str, str],
     parquet_blob_path: str | None,
     container_name: str,
@@ -200,17 +141,12 @@ def build_system_prompt(
             " inspect_data_format() — use to understand column formats before writing SQL."
         )
 
-    join_note = build_join_note(relationships, parquet_paths_all, container_name)
-
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
         container_name=container_name,
         max_calls=MAX_TOOL_CALLS,
         parquet_note=parquet_note,
         sample_note=sample_note,
     )
-
-    if join_note:
-        system_prompt += join_note
 
     if conversation_context:
         system_prompt += (

@@ -10,5 +10,6 @@ class UserOut(BaseModel):
     is_admin: bool
     created_at: datetime
     file_count: int = 0
+    allowed_domains: list[str] | None = None
 
     model_config = {"from_attributes": True}

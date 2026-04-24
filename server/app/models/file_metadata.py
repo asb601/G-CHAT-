@@ -1,6 +1,7 @@
 import uuid
 from datetime import datetime, timezone, date
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import String, BigInteger, Text, Date, DateTime, ForeignKey
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -31,6 +32,12 @@ class FileMetadata(Base):
     delimiter: Mapped[str] = mapped_column(String(10), default=",")
     sample_rows: Mapped[list | None] = mapped_column(JSONB, default=list)
     ingest_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Retrieval-engine columns (PHASE 1)
+    search_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    description_embedding: Mapped[list[float] | None] = mapped_column(
+        Vector(1536), nullable=True
+    )
     ingested_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

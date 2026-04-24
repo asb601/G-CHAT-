@@ -6,6 +6,7 @@ export interface User {
   name: string | null;
   picture: string | null;
   is_admin: boolean;
+  allowed_domains: string[] | null;
 }
 
 /** Retrieve stored JWT token */

@@ -290,42 +290,408 @@ function StatusBadge({ status }: { status: string }) {
 /* ── AI Pipeline panel ───────────────────────────────────────────────────── */
 
 /**
- * Decide a colour class for a single line of the pretty pipeline output.
- * The backend emits markers like "STEP 1", "STEP 2", "✗", "✓", "SQL", etc.
+ * Map a pipeline event name to a UI step (number, label, colour).
+ * Order in the UI mirrors the actual flow of a query.
  */
-function pipelineLineClass(line: string): string {
-  // Big section dividers
-  if (/^[═]{10,}$/.test(line.trim())) return "text-zinc-600";
-  if (/^[─]{10,}$/.test(line.trim())) return "text-zinc-700";
+type StepConfig = {
+  num: string;
+  label: string;
+  color: string; // tailwind text + bg combo for the badge
+  short: string; // one-line summary builder key
+};
 
-  // Step headers
-  if (/STEP\s+1\b/.test(line))     return "text-cyan-300 font-semibold";
-  if (/STEP\s+2\b/.test(line))     return "text-blue-300 font-semibold";
-  if (/STEP\s+3\b/.test(line))     return "text-violet-300 font-semibold";
-  if (/STEP\s+4\b/.test(line))     return "text-fuchsia-300 font-semibold";
-  if (/STEP\s+5\b/.test(line))     return "text-amber-300 font-semibold";
-  if (/STEP\s+6\b/.test(line))     return "text-orange-300 font-semibold";
-  if (/STEP\s+FINAL\b/.test(line)) return "text-emerald-300 font-bold";
+const PIPELINE_STEPS: Record<string, StepConfig> = {
+  query_received:        { num: "1", label: "Query Received",   color: "bg-cyan-500/15 text-cyan-300 border-cyan-500/30",       short: "query" },
+  catalog_loaded:        { num: "2", label: "Catalog Loaded",   color: "bg-blue-500/15 text-blue-300 border-blue-500/30",       short: "catalog" },
+  catalog_empty:         { num: "2", label: "Catalog Empty",    color: "bg-red-500/15 text-red-300 border-red-500/30",          short: "catalog_empty" },
+  system_prompt_built:   { num: "3", label: "System Prompt",    color: "bg-violet-500/15 text-violet-300 border-violet-500/30", short: "prompt" },
+  search_catalog:        { num: "3", label: "Catalog Search",   color: "bg-violet-500/15 text-violet-300 border-violet-500/30", short: "search" },
+  get_file_schema:       { num: "3", label: "File Schema",      color: "bg-violet-500/15 text-violet-300 border-violet-500/30", short: "schema" },
+  llm_input:             { num: "4", label: "LLM Input",        color: "bg-fuchsia-500/15 text-fuchsia-300 border-fuchsia-500/30", short: "llm_in" },
+  llm_stream_input:      { num: "4", label: "LLM Input",        color: "bg-fuchsia-500/15 text-fuchsia-300 border-fuchsia-500/30", short: "llm_in" },
+  llm_output:            { num: "4", label: "LLM Decision",     color: "bg-fuchsia-500/15 text-fuchsia-300 border-fuchsia-500/30", short: "llm_out" },
+  llm_stream_output:     { num: "4", label: "LLM Decision",     color: "bg-fuchsia-500/15 text-fuchsia-300 border-fuchsia-500/30", short: "llm_out" },
+  tool_call_start:       { num: "4", label: "Tool Start",       color: "bg-fuchsia-500/15 text-fuchsia-300 border-fuchsia-500/30", short: "tool_start" },
+  tool_call_end:         { num: "4", label: "Tool End",         color: "bg-fuchsia-500/15 text-fuchsia-300 border-fuchsia-500/30", short: "tool_end" },
+  sql_execute_start:     { num: "5", label: "SQL Executing",    color: "bg-amber-500/15 text-amber-300 border-amber-500/30",    short: "sql_start" },
+  sql_execute_done:      { num: "6", label: "SQL Result",       color: "bg-orange-500/15 text-orange-300 border-orange-500/30", short: "sql_done" },
+  sql_execute_error:     { num: "6", label: "SQL Error",        color: "bg-red-500/15 text-red-300 border-red-500/30",          short: "sql_error" },
+  inspect_data_format:   { num: "5", label: "Data Sample",      color: "bg-amber-500/15 text-amber-300 border-amber-500/30",    short: "sample" },
+  summarise_dataframe_done: { num: "5", label: "Stats",         color: "bg-amber-500/15 text-amber-300 border-amber-500/30",    short: "stats" },
+  ingest_llm_prompt:     { num: "i", label: "Ingest Prompt",    color: "bg-zinc-500/15 text-zinc-300 border-zinc-500/30",       short: "ingest_p" },
+  ingest_llm_response:   { num: "i", label: "Ingest Reply",     color: "bg-zinc-500/15 text-zinc-300 border-zinc-500/30",       short: "ingest_r" },
+  final_answer:          { num: "✓", label: "Final Answer",     color: "bg-emerald-500/15 text-emerald-300 border-emerald-500/40", short: "answer" },
+};
 
-  // Outcomes
-  if (/^\s*✗/.test(line) || /ERROR|FAILED/.test(line))         return "text-red-400";
-  if (/^\s*✓/.test(line) || /\bdone\b|\bANSWER\b/i.test(line)) return "text-emerald-400";
-  if (/^\s*▶/.test(line))                                       return "text-cyan-200";
-  if (/^\s*•/.test(line))                                       return "text-zinc-300";
+function pipelineSummary(ev: LogEntry): string {
+  const e = ev.event as string;
+  switch (e) {
+    case "query_received":      return String(ev.query ?? "");
+    case "catalog_loaded":      return `${ev.file_count} files in '${ev.container}' (${ev.parquet_count} parquet, ${ev.relationship_count} relationships)`;
+    case "catalog_empty":       return "No files ingested yet — agent cannot answer";
+    case "system_prompt_built": return `${ev.catalog_file_count} files | ${ev.parquet_file_count} parquet | rels:${ev.has_relationships ? "yes" : "no"}`;
+    case "search_catalog":      return `query="${ev.query}" → ${ev.files_found ?? (Array.isArray(ev.matched_files) ? (ev.matched_files as unknown[]).length : 0)} matches`;
+    case "get_file_schema":     return `${ev.blob_path}${ev.found ? "" : " (NOT FOUND)"}`;
+    case "llm_input":
+    case "llm_stream_input":    return `iteration ${ev.iteration} · ${ev.message_count ?? (Array.isArray(ev.messages) ? (ev.messages as unknown[]).length : 0)} messages`;
+    case "llm_output":
+    case "llm_stream_output": {
+      const tcs = (ev.tool_calls as unknown[]) || [];
+      const toks = `${ev.prompt_tokens ?? "?"}+${ev.completion_tokens ?? "?"} tok`;
+      if (tcs.length > 0) {
+        const names = tcs.map((tc) => (tc as { name?: string }).name ?? "?").join(", ");
+        return `iter ${ev.iteration} · ${toks} · → ${names}`;
+      }
+      return `iter ${ev.iteration} · ${toks} · final answer`;
+    }
+    case "tool_call_start":     return `${ev.tool} (iter ${ev.iteration})`;
+    case "tool_call_end":       return `${ev.tool} done`;
+    case "sql_execute_start":   return String(ev.sql ?? "").replace(/\s+/g, " ").slice(0, 120);
+    case "sql_execute_done":    return `${ev.rows_returned}/${ev.total_rows} rows · ${ev.duration_ms} ms`;
+    case "sql_execute_error":   return String(ev.error ?? "").slice(0, 120);
+    case "inspect_data_format": return `${Array.isArray(ev.columns) ? (ev.columns as unknown[]).length : 0} cols · ${Array.isArray(ev.rows) ? (ev.rows as unknown[]).length : 0} sample rows`;
+    case "summarise_dataframe_done": return `${ev.row_count} rows · ${ev.column_count} cols · focus=${ev.focus}`;
+    case "ingest_llm_prompt":   return `${ev.filename} (~${ev.estimated_prompt_tokens} tok)`;
+    case "ingest_llm_response": return `${ev.filename} · ${ev.duration_ms} ms`;
+    case "final_answer":        return `${ev.tool_calls} tool calls · ${ev.row_count} rows · ${ev.total_duration_ms} ms`;
+    default:                    return "";
+  }
+}
 
-  // SQL/tool lines
-  if (/^\s*(SELECT|FROM|WHERE|GROUP BY|ORDER BY|LIMIT|JOIN|WITH)\b/i.test(line))
-    return "text-amber-200";
+/* ─ small renderers used inside the expanded card ─ */
 
-  return "text-zinc-200";
+function PipelineCodeBlock({ children, lang }: { children: string; lang?: string }) {
+  return (
+    <pre className="bg-[#0d1117] border border-border rounded p-2 overflow-x-auto text-[11px] leading-relaxed text-zinc-200 font-mono whitespace-pre-wrap break-all">
+      {lang && <div className="text-[9px] uppercase text-muted-foreground mb-1">{lang}</div>}
+      <code>{children}</code>
+    </pre>
+  );
+}
+
+function PipelineRowsTable({ rows }: { rows: Record<string, unknown>[] }) {
+  if (!rows || rows.length === 0) return <div className="text-[11px] text-muted-foreground">(no rows)</div>;
+  const cols = Object.keys(rows[0]);
+  return (
+    <div className="overflow-x-auto border border-border rounded">
+      <table className="w-full text-[10px] font-mono">
+        <thead className="bg-surface-raised text-muted-foreground">
+          <tr>{cols.map((c) => <th key={c} className="px-2 py-1 text-left font-medium">{c}</th>)}</tr>
+        </thead>
+        <tbody>
+          {rows.slice(0, 20).map((r, i) => (
+            <tr key={i} className="border-t border-border/50">
+              {cols.map((c) => <td key={c} className="px-2 py-1 text-foreground">{String(r[c] ?? "")}</td>)}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {rows.length > 20 && (
+        <div className="px-2 py-1 text-[10px] text-muted-foreground bg-surface-raised">
+          … {rows.length - 20} more rows
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PipelineEventDetail({ ev }: { ev: LogEntry }) {
+  const e = ev.event as string;
+
+  if (e === "query_received") {
+    return (
+      <div className="space-y-2">
+        <div className="text-[11px] text-muted-foreground">User query:</div>
+        <PipelineCodeBlock>{String(ev.query ?? "")}</PipelineCodeBlock>
+        {ev.has_conversation_context ? (
+          <>
+            <div className="text-[11px] text-muted-foreground">Conversation context (preview):</div>
+            <PipelineCodeBlock>{String(ev.conversation_context_preview ?? "")}</PipelineCodeBlock>
+          </>
+        ) : (
+          <div className="text-[11px] text-muted-foreground">No conversation context</div>
+        )}
+      </div>
+    );
+  }
+
+  if (e === "catalog_loaded") {
+    const files = (ev.files as string[]) || [];
+    return (
+      <div className="space-y-2">
+        <div className="grid grid-cols-2 gap-2 text-[11px]">
+          <div><span className="text-muted-foreground">Container:</span> <span className="text-foreground font-mono">{String(ev.container)}</span></div>
+          <div><span className="text-muted-foreground">Files:</span> <span className="text-foreground font-mono">{String(ev.file_count)}</span></div>
+          <div><span className="text-muted-foreground">Parquet:</span> <span className="text-foreground font-mono">{String(ev.parquet_count)}</span></div>
+          <div><span className="text-muted-foreground">Relationships:</span> <span className="text-foreground font-mono">{String(ev.relationship_count)}</span></div>
+        </div>
+        <div className="text-[11px] text-muted-foreground">Files available to the agent:</div>
+        <div className="border border-border rounded p-2 bg-[#0d1117] max-h-48 overflow-auto">
+          {files.map((f, i) => (
+            <div key={i} className="text-[11px] font-mono text-zinc-200">• {f}</div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  if (e === "system_prompt_built") {
+    return (
+      <div className="space-y-2">
+        <div className="grid grid-cols-2 gap-2 text-[11px]">
+          <div><span className="text-muted-foreground">Container:</span> <span className="text-foreground font-mono">{String(ev.container)}</span></div>
+          <div><span className="text-muted-foreground">Files in catalog:</span> <span className="text-foreground font-mono">{String(ev.catalog_file_count)}</span></div>
+          <div><span className="text-muted-foreground">Parquet-ready:</span> <span className="text-foreground font-mono">{String(ev.parquet_file_count)}</span></div>
+          <div><span className="text-muted-foreground">Has relationships:</span> <span className="text-foreground font-mono">{ev.has_relationships ? "yes" : "no"}</span></div>
+        </div>
+        <div className="text-[11px] text-muted-foreground">Full prompt sent to LLM:</div>
+        <div className="max-h-72 overflow-auto">
+          <PipelineCodeBlock>{String(ev.system_prompt ?? "")}</PipelineCodeBlock>
+        </div>
+      </div>
+    );
+  }
+
+  if (e === "search_catalog") {
+    const matched = (ev.matched_files as string[]) || [];
+    return (
+      <div className="space-y-2">
+        <div className="text-[11px]"><span className="text-muted-foreground">Query:</span> <span className="font-mono text-foreground">{String(ev.query)}</span></div>
+        <div className="text-[11px] text-muted-foreground">Matched files (names only):</div>
+        <div className="border border-border rounded p-2 bg-[#0d1117]">
+          {matched.length === 0 ? <div className="text-[11px] text-muted-foreground">(no matches)</div> :
+            matched.map((f, i) => <div key={i} className="text-[11px] font-mono text-zinc-200">• {f}</div>)}
+        </div>
+      </div>
+    );
+  }
+
+  if (e === "get_file_schema") {
+    const cols = (ev.columns as string[]) || [];
+    const types = (ev.column_types as Record<string, string>) || {};
+    const samples = (ev.sample_values as Record<string, unknown[]>) || {};
+    return (
+      <div className="space-y-2">
+        <div className="text-[11px]">
+          <span className="text-muted-foreground">File:</span>{" "}
+          <span className="font-mono text-foreground">{String(ev.blob_path)}</span>{" "}
+          <span className={cn("ml-2 px-1.5 py-0.5 rounded text-[10px] border",
+            ev.found ? "bg-green-500/10 text-green-400 border-green-500/30"
+                     : "bg-red-500/10 text-red-400 border-red-500/30")}>
+            {ev.found ? "found" : "not found"}
+          </span>
+        </div>
+        {cols.length > 0 && (
+          <div className="border border-border rounded overflow-x-auto">
+            <table className="w-full text-[10px] font-mono">
+              <thead className="bg-surface-raised text-muted-foreground">
+                <tr><th className="px-2 py-1 text-left">column</th><th className="px-2 py-1 text-left">type</th><th className="px-2 py-1 text-left">sample</th></tr>
+              </thead>
+              <tbody>
+                {cols.map((c) => (
+                  <tr key={c} className="border-t border-border/50">
+                    <td className="px-2 py-1 text-foreground">{c}</td>
+                    <td className="px-2 py-1 text-cyan-300">{types[c] ?? ""}</td>
+                    <td className="px-2 py-1 text-muted-foreground">{(samples[c] || []).slice(0,3).map(String).join(", ")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (e === "llm_output" || e === "llm_stream_output") {
+    const tcs = (ev.tool_calls as { name?: string; args?: Record<string, unknown> }[]) || [];
+    return (
+      <div className="space-y-2">
+        <div className="grid grid-cols-3 gap-2 text-[11px]">
+          <div><span className="text-muted-foreground">Iteration:</span> <span className="font-mono">{String(ev.iteration)}</span></div>
+          <div><span className="text-muted-foreground">Tokens:</span> <span className="font-mono">{String(ev.prompt_tokens)} + {String(ev.completion_tokens)}</span></div>
+          <div><span className="text-muted-foreground">Duration:</span> <span className="font-mono">{String(ev.duration_ms ?? "?")} ms</span></div>
+        </div>
+        {tcs.length > 0 ? (
+          <>
+            <div className="text-[11px] text-muted-foreground">LLM decided to call {tcs.length} tool(s):</div>
+            {tcs.map((tc, i) => (
+              <div key={i} className="border border-border rounded p-2 bg-[#0d1117]">
+                <div className="text-[11px] text-fuchsia-300 font-mono mb-1">→ {tc.name}</div>
+                <PipelineCodeBlock lang="args">{JSON.stringify(tc.args ?? {}, null, 2)}</PipelineCodeBlock>
+              </div>
+            ))}
+          </>
+        ) : (
+          <>
+            <div className="text-[11px] text-muted-foreground">LLM decided: generate final answer</div>
+            <PipelineCodeBlock>{String(ev.content ?? "")}</PipelineCodeBlock>
+          </>
+        )}
+      </div>
+    );
+  }
+
+  if (e === "llm_input" || e === "llm_stream_input") {
+    const msgs = (ev.messages as { type: string; content: string; tool_calls?: unknown[] }[]) || [];
+    return (
+      <div className="space-y-2">
+        <div className="text-[11px] text-muted-foreground">{msgs.length} messages going into the LLM:</div>
+        <div className="max-h-72 overflow-auto space-y-1">
+          {msgs.map((m, i) => (
+            <div key={i} className="border border-border rounded p-2 bg-[#0d1117]">
+              <div className="text-[10px] text-cyan-300 font-mono mb-1">[{i + 1}] {m.type}</div>
+              <pre className="text-[11px] font-mono text-zinc-200 whitespace-pre-wrap break-all">{m.content?.slice(0, 800)}{(m.content?.length ?? 0) > 800 ? " …" : ""}</pre>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  if (e === "tool_call_start") {
+    return (
+      <div className="space-y-2">
+        <div className="text-[11px]"><span className="text-muted-foreground">Tool:</span> <span className="font-mono text-fuchsia-300">{String(ev.tool)}</span></div>
+        <PipelineCodeBlock lang="input">{JSON.stringify(ev.input ?? {}, null, 2)}</PipelineCodeBlock>
+      </div>
+    );
+  }
+
+  if (e === "tool_call_end") {
+    const out = String(ev.output ?? "");
+    return (
+      <div className="space-y-2">
+        <div className="text-[11px]"><span className="text-muted-foreground">Tool:</span> <span className="font-mono text-fuchsia-300">{String(ev.tool)}</span></div>
+        <PipelineCodeBlock lang="output">{out.length > 4000 ? out.slice(0, 4000) + "\n… (truncated)" : out}</PipelineCodeBlock>
+      </div>
+    );
+  }
+
+  if (e === "sql_execute_start") {
+    return (
+      <div className="space-y-2">
+        <div className="text-[11px] text-muted-foreground">SQL being executed:</div>
+        <PipelineCodeBlock lang="sql">{String(ev.sql ?? "")}</PipelineCodeBlock>
+      </div>
+    );
+  }
+
+  if (e === "sql_execute_done") {
+    const rows = (ev.preview_rows as Record<string, unknown>[]) || [];
+    return (
+      <div className="space-y-2">
+        <div className="grid grid-cols-3 gap-2 text-[11px]">
+          <div><span className="text-muted-foreground">Returned:</span> <span className="font-mono text-emerald-300">{String(ev.rows_returned)}/{String(ev.total_rows)}</span></div>
+          <div><span className="text-muted-foreground">Duration:</span> <span className="font-mono">{String(ev.duration_ms)} ms</span></div>
+          <div><span className="text-muted-foreground">Columns:</span> <span className="font-mono">{Array.isArray(ev.columns) ? (ev.columns as unknown[]).length : 0}</span></div>
+        </div>
+        <PipelineRowsTable rows={rows} />
+      </div>
+    );
+  }
+
+  if (e === "sql_execute_error") {
+    return (
+      <div className="space-y-2">
+        <div className="text-[11px] text-muted-foreground">SQL that failed:</div>
+        <PipelineCodeBlock lang="sql">{String(ev.sql ?? "")}</PipelineCodeBlock>
+        <div className="text-[11px] text-muted-foreground">Error:</div>
+        <div className="border border-red-500/30 bg-red-500/5 rounded p-2 text-[11px] font-mono text-red-300 whitespace-pre-wrap break-all">
+          {String(ev.error ?? "")}
+        </div>
+      </div>
+    );
+  }
+
+  if (e === "final_answer") {
+    return (
+      <div className="space-y-2">
+        <div className="grid grid-cols-3 gap-2 text-[11px]">
+          <div><span className="text-muted-foreground">Tool calls:</span> <span className="font-mono">{String(ev.tool_calls)}</span></div>
+          <div><span className="text-muted-foreground">Rows:</span> <span className="font-mono">{String(ev.row_count)}</span></div>
+          <div><span className="text-muted-foreground">Total time:</span> <span className="font-mono text-emerald-300">{String(ev.total_duration_ms)} ms</span></div>
+        </div>
+        <div className="text-[11px] text-muted-foreground">Answer delivered to user:</div>
+        <PipelineCodeBlock>{String(ev.answer ?? "")}</PipelineCodeBlock>
+      </div>
+    );
+  }
+
+  // Fallback: dump the JSON
+  return <PipelineCodeBlock>{JSON.stringify(ev, null, 2)}</PipelineCodeBlock>;
+}
+
+function PipelineEventRow({ ev }: { ev: LogEntry }) {
+  const [expanded, setExpanded] = useState(false);
+  const eventName = (ev.event as string) || "";
+  const cfg = PIPELINE_STEPS[eventName];
+  const ts = formatTimestamp(ev.timestamp as string);
+  const summary = pipelineSummary(ev);
+
+  // Unknown / non-pipeline events get a muted row
+  if (!cfg) {
+    return (
+      <div className="px-3 py-1.5 border-b border-border/40 text-[11px] font-mono text-muted-foreground">
+        <span className="mr-2">{ts}</span>{eventName} <span className="opacity-60">{JSON.stringify(ev).slice(0, 120)}</span>
+      </div>
+    );
+  }
+
+  const isFinal = eventName === "final_answer";
+  const isError = eventName === "sql_execute_error" || eventName === "catalog_empty";
+
+  return (
+    <div
+      className={cn(
+        "border-b border-border/50 transition-colors cursor-pointer hover:bg-surface-raised/40",
+        expanded && "bg-surface-raised/30",
+        isFinal && "bg-emerald-500/[0.04]",
+        isError && "bg-red-500/[0.04]",
+      )}
+      onClick={() => setExpanded(!expanded)}
+    >
+      <div className="flex items-center gap-2 px-3 py-1.5">
+        {/* Time */}
+        <span className="text-[10px] text-muted-foreground font-mono w-16 shrink-0">{ts}</span>
+
+        {/* Step badge */}
+        <span className={cn(
+          "inline-flex items-center justify-center w-6 h-5 rounded text-[10px] font-bold border shrink-0",
+          cfg.color,
+        )}>
+          {cfg.num}
+        </span>
+
+        {/* Step label */}
+        <span className={cn("px-1.5 py-0.5 rounded text-[10px] font-medium border shrink-0", cfg.color)}>
+          {cfg.label}
+        </span>
+
+        {/* Summary */}
+        <span className="text-xs text-foreground truncate font-mono">{summary}</span>
+
+        {/* Expand */}
+        <ChevronDown className={cn("w-3 h-3 text-muted-foreground transition-transform shrink-0 ml-auto", expanded && "rotate-180")} />
+      </div>
+
+      {expanded && (
+        <div className="px-3 pb-3 pt-1 pl-[6.5rem]">
+          <PipelineEventDetail ev={ev} />
+        </div>
+      )}
+    </div>
+  );
 }
 
 function PipelinePanel() {
-  const [text, setText] = useState<string>("");
+  const [events, setEvents] = useState<LogEntry[]>([]);
   const [lines, setLines] = useState<number>(300);
+  const [stepFilter, setStepFilter] = useState<string>("all");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(false);
+  const [totalLines, setTotalLines] = useState(0);
   const containerRef = useRef<HTMLDivElement>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -333,14 +699,13 @@ function PipelinePanel() {
     setLoading(true);
     setError(null);
     try {
-      const res = await apiFetch(`/api/logs/pipeline/tail?n=${lines}`);
+      const res = await apiFetch(`/api/logs/pipeline.log?lines=${lines}`);
       if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
-      const body = await res.text();
-      setText(body);
+      const data: LogResponse = await res.json();
+      setEvents(data.lines || []);
+      setTotalLines(data.total_lines || 0);
       requestAnimationFrame(() => {
-        if (containerRef.current) {
-          containerRef.current.scrollTop = containerRef.current.scrollHeight;
-        }
+        if (containerRef.current) containerRef.current.scrollTop = containerRef.current.scrollHeight;
       });
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to fetch pipeline log");
@@ -360,25 +725,55 @@ function PipelinePanel() {
     };
   }, [autoRefresh, fetchPipeline]);
 
-  const renderedLines = text ? text.split("\n") : [];
+  const filtered = stepFilter === "all"
+    ? events
+    : events.filter((ev) => {
+        const cfg = PIPELINE_STEPS[(ev.event as string) || ""];
+        return cfg?.num === stepFilter;
+      });
 
   return (
     <div className="flex flex-col h-full">
       {/* Toolbar */}
-      <div className="border-b border-border px-4 py-2 flex items-center gap-2 shrink-0">
-        <span className="text-xs text-muted-foreground">
-          AI Pipeline trace — every step from query to final answer
-        </span>
+      <div className="border-b border-border px-4 py-2 flex flex-wrap items-center gap-2 shrink-0">
+        {/* Step filter chips */}
+        <div className="flex items-center gap-1">
+          {[
+            { v: "all", label: "All" },
+            { v: "1",   label: "1 · Query" },
+            { v: "2",   label: "2 · Catalog" },
+            { v: "3",   label: "3 · Prompt" },
+            { v: "4",   label: "4 · LLM" },
+            { v: "5",   label: "5 · SQL" },
+            { v: "6",   label: "6 · Result" },
+            { v: "✓",   label: "✓ Final" },
+          ].map((s) => (
+            <button
+              key={s.v}
+              onClick={() => setStepFilter(s.v)}
+              className={cn(
+                "px-2 py-1 rounded text-[11px] font-medium transition-colors",
+                stepFilter === s.v
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-surface-raised text-muted-foreground hover:text-foreground"
+              )}
+            >
+              {s.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="w-px h-5 bg-border mx-1 hidden sm:block" />
 
         <select
           value={lines}
           onChange={(e) => setLines(Number(e.target.value))}
-          className="ml-auto px-2 py-1 rounded bg-surface-raised border border-border text-xs text-foreground"
+          className="px-2 py-1 rounded bg-surface-raised border border-border text-xs text-foreground"
         >
-          <option value={100}>last 100 events</option>
-          <option value={300}>last 300 events</option>
-          <option value={500}>last 500 events</option>
-          <option value={1000}>last 1000 events</option>
+          <option value={100}>100 events</option>
+          <option value={300}>300 events</option>
+          <option value={500}>500 events</option>
+          <option value={1000}>1000 events</option>
         </select>
 
         <button
@@ -391,7 +786,7 @@ function PipelinePanel() {
           )}
         >
           <RefreshCw className={cn("w-3 h-3", autoRefresh && "animate-spin")} />
-          {autoRefresh ? "Live (3s)" : "Auto"}
+          {autoRefresh ? "Live" : "Auto"}
         </button>
 
         <button
@@ -401,6 +796,10 @@ function PipelinePanel() {
         >
           <RefreshCw className={cn("w-3.5 h-3.5", loading && "animate-spin")} />
         </button>
+
+        <span className="text-[10px] text-muted-foreground ml-auto hidden sm:block">
+          {filtered.length} / {totalLines} events
+        </span>
       </div>
 
       {error && (
@@ -410,23 +809,15 @@ function PipelinePanel() {
         </div>
       )}
 
-      <div
-        ref={containerRef}
-        className="flex-1 overflow-auto bg-[#0b0d12] font-mono text-[11px] leading-[1.45] px-3 py-2"
-      >
-        {renderedLines.length === 0 && !loading && (
+      <div ref={containerRef} className="flex-1 overflow-y-auto bg-[#0d1117]">
+        {filtered.length === 0 && !loading && (
           <div className="flex flex-col items-center justify-center h-full gap-2 text-muted-foreground">
             <Activity className="w-8 h-8" />
-            <p className="text-sm">No pipeline events yet — send a chat query to see the trace.</p>
+            <p className="text-sm">No pipeline events — send a chat query to see the trace.</p>
           </div>
         )}
-        {renderedLines.map((line, i) => (
-          <pre
-            key={i}
-            className={cn("whitespace-pre m-0", pipelineLineClass(line))}
-          >
-            {line || "\u00A0"}
-          </pre>
+        {filtered.map((ev, i) => (
+          <PipelineEventRow key={i} ev={ev} />
         ))}
       </div>
     </div>

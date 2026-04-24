@@ -9,7 +9,6 @@ from app.core.logger import pipeline_logger
 
 def build_catalog_tools(
     catalog: list[dict],
-    relationships: list[dict],
     parquet_paths: dict[str, str] | None = None,
     container_name: str = "",
 ) -> list:
@@ -47,11 +46,6 @@ def build_catalog_tools(
                     "key_dimensions": f.get("key_dimensions") or [],
                     "good_for": f.get("good_for") or [],
                     "date_range": f"{f.get('date_range_start')} → {f.get('date_range_end')}",
-                    "relationships": [
-                        f"{r['file_b_path']} via {r['shared_column']}"
-                        for r in relationships
-                        if r["file_a_path"] == f["blob_path"] and r["confidence_score"] > 0.5
-                    ],
                 })
 
         if not results:

@@ -1,17 +1,53 @@
 import time
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func, select
+from pydantic import BaseModel
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.logger import auth_logger
-from app.dependencies import require_admin
+from app.dependencies import get_current_user, require_admin
 from app.models.file import File
+from app.models.folder import Folder
 from app.models.user import User
 from app.schemas.user import UserOut
 
 router = APIRouter(prefix="/users", tags=["users"])
+
+
+class _MeDomainsBody(BaseModel):
+    allowed_domains: list[str] | None  # None or [] = clear restriction
+
+
+@router.get("/domains")
+async def list_available_domains(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Return all distinct domain tags any authenticated user can pick from."""
+    rows = (
+        await db.execute(
+            select(Folder.domain_tag).where(Folder.domain_tag.isnot(None)).distinct()
+        )
+    ).scalars().all()
+    return {"domains": sorted(rows)}
+
+
+@router.patch("/me/domains")
+async def set_my_domains(
+    body: _MeDomainsBody,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Let the authenticated user choose which domains/departments they belong to."""
+    domains = body.allowed_domains if body.allowed_domains else None
+    await db.execute(
+        update(User).where(User.id == current_user.id).values(allowed_domains=domains)
+    )
+    await db.commit()
+    auth_logger.info("user_domains_updated", user_id=current_user.id, domains=domains)
+    return {"allowed_domains": domains}
 
 
 @router.get("", response_model=list[UserOut])
@@ -41,6 +77,7 @@ async def list_users(
             is_admin=u.is_admin,
             created_at=u.created_at,
             file_count=file_count,
+            allowed_domains=u.allowed_domains,
         )
         for u, file_count in rows
     ]

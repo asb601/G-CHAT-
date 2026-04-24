@@ -3,12 +3,16 @@ Admin API — internal endpoints for monitoring and cost tracking.
 
 GET  /api/admin/cost-summary
 POST /api/admin/reingest-all
+GET  /api/admin/domains
+PATCH /api/admin/users/{user_id}/domains
+PATCH /api/admin/folders/{folder_id}/domain
 """
 import asyncio
 import uuid
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,6 +25,7 @@ from app.models.file import File
 from app.models.file_analytics import FileAnalytics
 from app.models.file_metadata import FileMetadata
 from app.models.file_relationship import FileRelationship
+from app.models.folder import Folder
 from app.models.user import User
 from app.services.ingestion_service import ingest_file
 
@@ -108,3 +113,108 @@ async def reingest_all(
     asyncio.create_task(_batch_reingest(file_ids))
 
     return {"message": "Re-ingestion started", "file_count": len(file_ids)}
+
+
+# ── Domain access control ────────────────────────────────────────────────────
+
+class _UserDomainsBody(BaseModel):
+    allowed_domains: list[str] | None  # None = unrestricted
+
+
+class _FolderDomainBody(BaseModel):
+    domain_tag: str | None  # None = untagged (public)
+
+
+class _CreateDomainBody(BaseModel):
+    name: str
+
+
+@router.get("/domains")
+async def list_domains(
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Return all distinct non-null domain tags currently in use on folders."""
+    rows = (await db.execute(
+        select(Folder.domain_tag).where(Folder.domain_tag.isnot(None)).distinct()
+    )).scalars().all()
+    return {"domains": sorted(rows)}
+
+
+@router.post("/domains")
+async def create_domain(
+    body: _CreateDomainBody,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """
+    Create a new domain by registering a top-level system folder tagged with it.
+    The folder becomes the home for files belonging to that domain.
+    """
+    import uuid as _uuid
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Domain name cannot be empty")
+
+    # Check for existing domain folder with same tag
+    existing = (await db.execute(
+        select(Folder).where(Folder.domain_tag == name).limit(1)
+    )).scalar_one_or_none()
+    if existing:
+        raise HTTPException(status_code=409, detail=f"Domain '{name}' already exists")
+
+    folder = Folder(
+        id=str(_uuid.uuid4()),
+        name=name,
+        owner_id=admin.id,
+        parent_id=None,
+        container_id=None,
+        domain_tag=name,
+    )
+    db.add(folder)
+    await db.commit()
+    return {"domain": name, "folder_id": folder.id}
+
+
+@router.patch("/users/{user_id}/domains")
+async def set_user_domains(
+    user_id: str,
+    body: _UserDomainsBody,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """
+    Set a user's allowed_domains list.
+    Pass null to remove restrictions (unrestricted access).
+    """
+    user = await db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    # Normalise: empty list → None (unrestricted)
+    domains = body.allowed_domains if body.allowed_domains else None
+    await db.execute(
+        update(User).where(User.id == user_id).values(allowed_domains=domains)
+    )
+    await db.commit()
+    return {"user_id": user_id, "allowed_domains": domains}
+
+
+@router.patch("/folders/{folder_id}/domain")
+async def set_folder_domain(
+    folder_id: str,
+    body: _FolderDomainBody,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """
+    Tag a folder with a domain string (e.g. "finance", "hr").
+    Pass null to remove the tag (folder becomes public).
+    """
+    folder = await db.get(Folder, folder_id)
+    if folder is None:
+        raise HTTPException(status_code=404, detail="Folder not found")
+    await db.execute(
+        update(Folder).where(Folder.id == folder_id).values(domain_tag=body.domain_tag or None)
+    )
+    await db.commit()
+    return {"folder_id": folder_id, "domain_tag": body.domain_tag or None}

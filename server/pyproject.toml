@@ -26,6 +26,7 @@ dependencies = [
     "langchain-openai>=0.2",
     "langchain-core>=0.3",
     "langchain-community>=0.3",
+    "pgvector>=0.3.6",
 ]
 
 [build-system]

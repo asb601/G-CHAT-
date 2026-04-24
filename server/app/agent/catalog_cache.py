@@ -11,9 +11,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logger import chat_logger
 from app.models.container import ContainerConfig
+from app.models.file import File
 from app.models.file_analytics import FileAnalytics
 from app.models.file_metadata import FileMetadata
-from app.models.file_relationship import FileRelationship
+from app.models.folder import Folder
 
 _CATALOG_TTL = 300  # seconds
 
@@ -31,11 +32,18 @@ def invalidate_catalog_cache() -> None:
     chat_logger.info("catalog_cache_invalidated")
 
 
-async def load_catalog(db: AsyncSession) -> dict | None:
+async def load_catalog(
+    db: AsyncSession,
+    allowed_domains: list[str] | None = None,
+) -> dict | None:
     """
     Load catalog data from Postgres, with 5-minute in-memory caching.
 
-    Returns dict with keys: catalog, relationships, connection_string,
+    allowed_domains: if set, catalog entries whose folder has a domain_tag NOT
+    in the list are excluded from the returned catalog (and from relationships
+    and parquet_paths_all). None / empty list = no filtering (admin or unset).
+
+    Returns dict with keys: catalog, connection_string,
     container_name, parquet_blob_path, parquet_paths_all, sample_rows.
     Returns None if no files exist.
     """
@@ -50,11 +58,28 @@ async def load_catalog(db: AsyncSession) -> dict | None:
     if not all_meta:
         return None
 
+    # Build file_id → domain_tag map via File → Folder join
+    file_rows = list((await db.execute(select(File))).scalars().all())
+    folder_ids = {f.folder_id for f in file_rows if f.folder_id}
+    folder_rows = list(
+        (await db.execute(select(Folder).where(Folder.id.in_(folder_ids)))).scalars().all()
+        if folder_ids else []
+    )
+    folder_domain: dict[str, str | None] = {fo.id: fo.domain_tag for fo in folder_rows}
+    file_folder: dict[str, str | None] = {f.id: f.folder_id for f in file_rows}
+
+    def _domain_tag(file_id: str) -> str | None:
+        fid = file_folder.get(file_id)
+        if not fid:
+            return None
+        return folder_domain.get(fid)
+
     catalog = [
         {
             "file_id": m.file_id,
             "blob_path": m.blob_path,
             "container_id": m.container_id,
+            "domain_tag": _domain_tag(m.file_id),
             "ai_description": m.ai_description or "",
             "good_for": m.good_for or [],
             "key_metrics": m.key_metrics or [],
@@ -64,18 +89,6 @@ async def load_catalog(db: AsyncSession) -> dict | None:
             "date_range_end": str(m.date_range_end) if m.date_range_end else None,
         }
         for m in all_meta
-    ]
-
-    all_rels = list((await db.execute(select(FileRelationship))).scalars().all())
-    relationships = [
-        {
-            "file_a_path": r.file_a_path,
-            "file_b_path": r.file_b_path,
-            "shared_column": r.shared_column,
-            "confidence_score": r.confidence_score,
-            "join_type": r.join_type,
-        }
-        for r in all_rels
     ]
 
     first_meta = all_meta[0]
@@ -101,7 +114,6 @@ async def load_catalog(db: AsyncSession) -> dict | None:
 
     result = {
         "catalog": catalog,
-        "relationships": relationships,
         "connection_string": container.connection_string,
         "container_name": container.container_name,
         "parquet_blob_path": parquet_blob_path,
@@ -114,4 +126,21 @@ async def load_catalog(db: AsyncSession) -> dict | None:
         _catalog_cache_time = time.time()
 
     chat_logger.info("catalog_cache_loaded", file_count=len(catalog))
+
+    # Apply domain filter AFTER caching — cache always holds the full catalog.
+    # Filtering is per-request so different users get different views from the same cache.
+    if allowed_domains:
+        visible_blobs = {
+            e["blob_path"]
+            for e in catalog
+            if e["domain_tag"] is None or e["domain_tag"] in allowed_domains
+        }
+        filtered_catalog = [e for e in catalog if e["blob_path"] in visible_blobs]
+        filtered_parquets = {k: v for k, v in parquet_paths_all.items() if k in visible_blobs}
+        return {
+            **result,
+            "catalog": filtered_catalog,
+            "parquet_paths_all": filtered_parquets,
+        }
+
     return result

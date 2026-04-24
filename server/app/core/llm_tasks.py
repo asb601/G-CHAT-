@@ -5,7 +5,7 @@ import asyncio
 import json
 import time
 
-from app.core.logger import ingest_logger, pipeline_logger
+from app.core.logger import ingest_logger
 from app.core.openai_client import get_client
 from app.core.token_counter import count_tokens, elapsed_ms, track_and_log
 
@@ -51,16 +51,6 @@ Sample rows: {json.dumps(sample_rows[:3], default=str)}"""
 
         prompt_tokens = count_tokens(prompt, deployment)
 
-        # ── Log the complete prompt sent to GPT-4 ─────────────────────────────
-        pipeline_logger.info(
-            "ingest_llm_prompt",
-            function="generate_file_description",
-            filename=filename,
-            deployment=deployment,
-            estimated_prompt_tokens=prompt_tokens,
-            prompt=prompt,  # full prompt, no truncation
-        )
-
         t = time.perf_counter()
         response = client.chat.completions.create(
             model=deployment,
@@ -74,17 +64,6 @@ Sample rows: {json.dumps(sample_rows[:3], default=str)}"""
         api = response.usage
         p_tok = api.prompt_tokens if api else prompt_tokens
         c_tok = api.completion_tokens if api else count_tokens(raw, deployment)
-
-        # ── Log the full raw response from the LLM ────────────────────────────
-        pipeline_logger.info(
-            "ingest_llm_response",
-            function="generate_file_description",
-            filename=filename,
-            duration_ms=duration,
-            prompt_tokens=p_tok,
-            completion_tokens=c_tok,
-            raw_response=raw,  # full response, no truncation
-        )
 
         parsed = safe_parse_json(raw)
         if not parsed.get("summary"):

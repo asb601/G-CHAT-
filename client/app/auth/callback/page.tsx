@@ -2,7 +2,7 @@
 
 import { Suspense, useEffect } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { setToken } from "@/lib/auth";
+import { setToken, fetchMe } from "@/lib/auth";
 
 function CallbackHandler() {
   const router = useRouter();
@@ -10,14 +10,24 @@ function CallbackHandler() {
 
   useEffect(() => {
     const token = searchParams.get("token");
-    if (token) {
-      setToken(token);
-      // Also set a cookie so middleware can read it (localStorage isn't available in middleware)
-      document.cookie = `token=${token}; path=/; max-age=${60 * 60 * 24 * 7}; SameSite=Lax`;
-      router.replace("/chat");
-    } else {
+    if (!token) {
       router.replace("/login?error=no_token");
+      return;
     }
+    setToken(token);
+    document.cookie = `token=${token}; path=/; max-age=${60 * 60 * 24 * 7}; SameSite=Lax`;
+
+    // Fetch user to decide where to send them
+    fetchMe().then((user) => {
+      if (user && !user.is_admin && !user.allowed_domains) {
+        // First-time user: no domain selected yet — send to onboarding
+        router.replace("/onboarding");
+      } else {
+        router.replace("/chat");
+      }
+    }).catch(() => {
+      router.replace("/chat");
+    });
   }, [searchParams, router]);
 
   return null;

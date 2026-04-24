@@ -95,7 +95,12 @@ async def chat_message(
                      query=query[:200], has_context=bool(conversation_context))
 
     try:
-        result = await run_agent_query(query, db, conversation_context=conversation_context)
+        result = await run_agent_query(
+            query, db,
+            conversation_context=conversation_context,
+            user_id=user.id,
+            is_admin=getattr(user, "is_admin", False),
+        )
 
         full_data = result.get("data", [])
         stored_data = full_data[:MAX_STORED_DATA_ROWS]

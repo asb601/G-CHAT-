@@ -20,7 +20,6 @@ from app.api.v1.logs import router as logs_router
 import app.models.file  # ensure File table is created
 import app.models.container  # ensure ContainerConfig table is created
 import app.models.file_metadata  # ensure FileMetadata table is created
-import app.models.file_relationship  # ensure FileRelationship table is created
 import app.models.file_analytics  # ensure FileAnalytics table is created
 import app.models.background_job  # ensure BackgroundJob table is created
 import app.models.conversation  # ensure Conversation + Message tables are created
@@ -53,6 +52,20 @@ async def lifespan(app: FastAPI):
         await _add_column_if_missing(conn, "files", "upload_duration_secs", "DOUBLE PRECISION")
         await _add_column_if_missing(conn, "folders", "container_id", "VARCHAR(36) REFERENCES container_configs(id) ON DELETE CASCADE")
         await _add_column_if_missing(conn, "users", "is_admin", "BOOLEAN NOT NULL DEFAULT FALSE")
+
+    # Retrieval-engine schema (pgvector + pg_trgm + new file_metadata columns)
+    from app.migrations.retrieval_schema_upgrade import migrate as _retrieval_migrate
+    try:
+        await _retrieval_migrate()
+    except Exception as exc:
+        chat_logger.warning("retrieval_migration_failed", error=str(exc)[:300])
+
+    # Domain access control schema (domain_tag on folders, allowed_domains on users)
+    from app.migrations.domain_schema_upgrade import migrate as _domain_migrate
+    try:
+        await _domain_migrate()
+    except Exception as exc:
+        chat_logger.warning("domain_migration_failed", error=str(exc)[:300])
     yield
     await engine.dispose()
 

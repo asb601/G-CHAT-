@@ -95,7 +95,13 @@ async def chat_message_stream(
         try:
             final_payload = None
 
-            async for evt in run_agent_query_stream(query, db, conversation_context=conversation_context):
+            async for evt in run_agent_query_stream(
+                query, db,
+                conversation_context=conversation_context,
+                user_id=user.id,
+                is_admin=getattr(user, "is_admin", False),
+                allowed_domains=None if getattr(user, "is_admin", False) else (getattr(user, "allowed_domains", None) or []),
+            ):
                 evt_type = evt["type"]
 
                 if evt_type == "token":
@@ -103,6 +109,9 @@ async def chat_message_stream(
 
                 elif evt_type == "thinking":
                     yield f"data: {_json.dumps({'event': 'thinking', 'tool': evt.get('tool', '')})}\n\n"
+
+                elif evt_type == "pipeline_step":
+                    yield f"data: {_json.dumps({'event': 'pipeline_step', 'step': evt.get('step', ''), 'retrieved_files': evt.get('retrieved_files', 0), 'total_files': evt.get('total_files', 0)})}\n\n"
 
                 elif evt_type == "tool_result":
                     yield f"data: {_json.dumps({'event': 'tool_result', 'tool': evt.get('tool', '')})}\n\n"

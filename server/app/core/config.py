@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     AZURE_OPENAI_ENDPOINT: str = ""
     AZURE_OPENAI_KEY: str = ""
     AZURE_OPENAI_DEPLOYMENT: str = "gpt-4"
+    # Embedding model deployment name — must be deployed in the same Azure OpenAI resource.
+    # Standard name: text-embedding-3-small  (deploy it once in Azure Portal, paste name here)
+    AZURE_OPENAI_EMBEDDING_DEPLOYMENT: str = "text-embedding-3-small"
 
     # .env aliases (AZURE_OPENAI_API_BASE / AZURE_OPENAI_API_KEY / AZURE_OPENAI_MODEL)
     AZURE_OPENAI_API_BASE: str = ""

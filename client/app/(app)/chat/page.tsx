@@ -41,6 +41,8 @@ interface AssistantPayload {
   suggested_rephrase?: string | null;
   tool_calls?: number;
   files_used?: string[];
+  retrieved_files?: number;
+  total_files?: number;
 }
 
 interface Message {
@@ -318,6 +320,11 @@ function ResultsAccordion({
           {payload.files_used && payload.files_used.length > 0 && (
             <span className="text-[11px] text-muted-foreground hidden sm:inline">
               · {payload.files_used.length} file{payload.files_used.length !== 1 ? "s" : ""}
+            </span>
+          )}
+          {payload.retrieved_files != null && payload.total_files != null && payload.total_files > 0 && (
+            <span className="text-[11px] text-muted-foreground hidden sm:inline">
+              · {payload.retrieved_files}/{payload.total_files} searched
             </span>
           )}
         </div>
@@ -791,6 +798,22 @@ export default function ChatPage() {
             if (event.event === "started" && event.conversation_id) {
               if (!activeConvId || activeConvId !== event.conversation_id) {
                 setActiveConvId(event.conversation_id);
+              }
+            } else if (event.event === "pipeline_step" && event.step === "retrieval") {
+              const r: number = event.retrieved_files ?? 0;
+              const t: number = event.total_files ?? 0;
+              const label =
+                t > 0 && r < t
+                  ? `Searching ${r} of ${t} relevant files…`
+                  : t > 0
+                  ? `Searching ${t} files…`
+                  : "Searching files…";
+              if (!streamMsgId) {
+                streamMsgId = crypto.randomUUID();
+                setMessages((prev) => [
+                  ...prev,
+                  { id: streamMsgId!, role: "assistant", content: label },
+                ]);
               }
             } else if (event.event === "thinking") {
               // Show which tool is running (e.g. "Running run_sql...")

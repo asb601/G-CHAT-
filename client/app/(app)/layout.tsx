@@ -1,6 +1,6 @@
 "use client";
 
-import { useRouter } from "next/navigation";
+import { useRouter, usePathname } from "next/navigation";
 import { useState, useEffect } from "react";
 import { MessageSquare, FolderOpen, LogOut, PanelLeftClose, PanelLeft, Database, UserCircle, ScrollText } from "lucide-react";
 import { NavLink, MobileNavLink } from "@/components/nav-link";
@@ -15,13 +15,20 @@ interface NavItem {
 function AppShellInner({ children }: { children: React.ReactNode }) {
   const { user, loading, logout } = useAuth();
   const router = useRouter();
+  const pathname = usePathname();
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
   useEffect(() => {
-    if (!loading && !user) {
+    if (loading) return;
+    if (!user) {
       router.replace("/login");
+      return;
     }
-  }, [loading, user, router]);
+    // Regular users with no domain selection should be routed to onboarding
+    if (!user.is_admin && !user.allowed_domains && pathname !== "/onboarding") {
+      router.replace("/onboarding");
+    }
+  }, [loading, user, router, pathname]);
 
   if (loading) {
     return (

@@ -10,7 +10,6 @@ from typing_extensions import TypedDict
 class AgentState(TypedDict):
     messages: Annotated[list, add_messages]
     catalog: list[dict]
-    relationships: list[dict]
     connection_string: str
     container_name: str
     parquet_blob_path: str | None  # prefer Parquet reads when available

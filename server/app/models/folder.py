@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import String, DateTime, ForeignKey
+from sqlalchemy import String, DateTime, ForeignKey, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
 
@@ -21,6 +21,9 @@ class Folder(Base):
     container_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("container_configs.id", ondelete="CASCADE"), nullable=True
     )
+    # Domain tag (PHASE 15): optional single label (e.g. 'finance', 'hr').
+    # NULL means the folder is in no domain → always visible to all users.
+    domain_tag: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

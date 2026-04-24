@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.catalog_cache import invalidate_catalog_cache, load_catalog  # re-export
 from app.agent.graph.graph_builder import build_graph
 from app.agent.prompts.prompt_builder import build_system_prompt
+from app.retrieval.orchestrator import retrieve_with_scores
 from app.agent.response_helpers import (
     extract_answer,
     extract_blob_paths,
@@ -48,6 +49,9 @@ async def _build_agent_context(
     query: str,
     db: AsyncSession,
     conversation_context: str = "",
+    user_id: str = "",
+    is_admin: bool = True,
+    allowed_domains: list[str] | None = None,
 ) -> dict | None:
     """
     Shared setup for both streaming and non-streaming entry points.
@@ -61,7 +65,7 @@ async def _build_agent_context(
         conversation_context_preview=(conversation_context[:300] if conversation_context else ""),
     )
 
-    cached = await load_catalog(db)
+    cached = await load_catalog(db, allowed_domains=None if is_admin else allowed_domains)
     if not cached:
         pipeline_logger.warning("catalog_empty", query=query, reason="no files ingested yet")
         return None
@@ -73,17 +77,54 @@ async def _build_agent_context(
         container=cached["container_name"],
         file_count=len(cached["catalog"]),
         parquet_count=len(cached["parquet_paths_all"]),
-        relationship_count=len(cached["relationships"]),
         files=[f.get("blob_path", "") for f in cached["catalog"]],
     )
 
-    catalog = cached["catalog"]
-    relationships = cached["relationships"]
+    full_catalog = cached["catalog"]
     connection_string = cached["connection_string"]
     container_name = cached["container_name"]
     parquet_blob_path = cached["parquet_blob_path"]
-    parquet_paths_all = cached["parquet_paths_all"]
+    all_parquet_paths = cached["parquet_paths_all"]
     sample_rows = cached["sample_rows"]
+
+    # ── STEP 2.5: RETRIEVAL — filter catalog to top-K relevant files ─────────
+    # Run the 9-stage retrieval pipeline (temporal → BM25 → fuzzy → vector →
+    # graph_expand → RRF). Only the relevant files go into the system prompt.
+    # The full catalog is still passed to build_catalog_tools so search_catalog
+    # can still scan all files if needed.
+    retrieved_with_scores = []
+    if user_id:
+        try:
+            retrieved_with_scores = await retrieve_with_scores(
+                query, user_id, is_admin, db, top_k=20
+            )
+        except Exception as exc:
+            chat_logger.warning("retrieval_error_fallback", error=str(exc)[:200])
+
+    if retrieved_with_scores:
+        retrieved_ids = {meta.file_id for meta, _ in retrieved_with_scores}
+        catalog = [e for e in full_catalog if e.get("file_id") in retrieved_ids]
+        parquet_paths_all = {
+            k: v for k, v in all_parquet_paths.items()
+            if k in {e.get("blob_path") for e in catalog}
+        }
+        pipeline_logger.info(
+            "retrieval_filtered",
+            query=query,
+            total_files=len(full_catalog),
+            retrieved_files=len(catalog),
+            top_scores=[(meta.file_id, round(s, 4)) for meta, s in retrieved_with_scores[:5]],
+        )
+    else:
+        # Fallback: no retrieval results or no user_id — use full catalog
+        catalog = full_catalog
+        parquet_paths_all = all_parquet_paths
+        pipeline_logger.info(
+            "retrieval_fallback",
+            query=query,
+            reason="no retrieval results" if user_id else "no user_id",
+            total_files=len(full_catalog),
+        )
 
     # Per-request state store
     req_id = uuid.uuid4().hex
@@ -94,7 +135,8 @@ async def _build_agent_context(
     # Build tools
     all_tools = []
     all_tools.extend(build_sql_tools(connection_string, container_name, parquet_blob_path, store))
-    all_tools.extend(build_catalog_tools(catalog, relationships, parquet_paths_all, container_name))
+    # search_catalog tool uses the full catalog so it can find any file
+    all_tools.extend(build_catalog_tools(full_catalog, all_parquet_paths, container_name))
     all_tools.extend(build_stats_tool(store))
     all_tools.extend(build_sample_tool(sample_rows))
 
@@ -104,7 +146,6 @@ async def _build_agent_context(
     # Build system prompt
     system_prompt = build_system_prompt(
         catalog=catalog,
-        relationships=relationships,
         parquet_paths_all=parquet_paths_all,
         parquet_blob_path=parquet_blob_path,
         container_name=container_name,
@@ -119,7 +160,6 @@ async def _build_agent_context(
         container=container_name,
         catalog_file_count=len(catalog),
         parquet_file_count=len(parquet_paths_all),
-        has_relationships=bool(relationships),
         has_conversation_context=bool(conversation_context),
         system_prompt=system_prompt,  # full prompt, no truncation
     )
@@ -127,7 +167,6 @@ async def _build_agent_context(
     initial_state: AgentState = {
         "messages": [SystemMessage(content=system_prompt), HumanMessage(content=query)],
         "catalog": catalog,
-        "relationships": relationships,
         "connection_string": connection_string,
         "container_name": container_name,
         "parquet_blob_path": parquet_blob_path,
@@ -141,6 +180,7 @@ async def _build_agent_context(
         "store": store,
         "req_id": req_id,
         "catalog_len": len(catalog),
+        "total_files": len(full_catalog),
         "container_name": container_name,
         "parquet_blob_path": parquet_blob_path,
     }
@@ -148,14 +188,22 @@ async def _build_agent_context(
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
-async def run_agent_query(query: str, db: AsyncSession, *, conversation_context: str = "") -> dict:
+async def run_agent_query(
+    query: str,
+    db: AsyncSession,
+    *,
+    conversation_context: str = "",
+    user_id: str = "",
+    is_admin: bool = True,
+    allowed_domains: list[str] | None = None,
+) -> dict:
     """
     Main entry point for the agentic query pipeline.
     Returns {answer, data, chart, route, row_count, files_used, tool_calls}.
     """
     pipeline_start = time.perf_counter()
 
-    ctx = await _build_agent_context(query, db, conversation_context)
+    ctx = await _build_agent_context(query, db, conversation_context, user_id, is_admin, allowed_domains)
     if not ctx:
         return {"answer": _NO_FILES_MSG, "data": [], "chart": None}
 
@@ -235,6 +283,9 @@ async def run_agent_query_stream(
     db: AsyncSession,
     *,
     conversation_context: str = "",
+    user_id: str = "",
+    is_admin: bool = True,
+    allowed_domains: list[str] | None = None,
 ) -> AsyncIterator[dict]:
     """
     Streaming variant of run_agent_query.
@@ -247,7 +298,7 @@ async def run_agent_query_stream(
     """
     pipeline_start = time.perf_counter()
 
-    ctx = await _build_agent_context(query, db, conversation_context)
+    ctx = await _build_agent_context(query, db, conversation_context, user_id, is_admin, allowed_domains)
     if not ctx:
         yield {
             "type": "done",
@@ -258,6 +309,14 @@ async def run_agent_query_stream(
             },
         }
         return
+
+    # Emit retrieval summary so the frontend can show "Searching N files…"
+    yield {
+        "type": "pipeline_step",
+        "step": "retrieval",
+        "retrieved_files": ctx["catalog_len"],
+        "total_files": ctx["total_files"],
+    }
 
     graph = ctx["graph"]
     initial_state = ctx["initial_state"]
@@ -402,5 +461,7 @@ async def run_agent_query_stream(
             "row_count": len(sql_results),
             "files_used": list(files_used),
             "tool_calls": tool_calls_made,
+            "retrieved_files": ctx["catalog_len"],
+            "total_files": ctx["total_files"],
         },
     }
