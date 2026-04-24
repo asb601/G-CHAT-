@@ -15,6 +15,7 @@ import {
   CheckCircle,
   XCircle,
   Loader2,
+  Activity,
 } from "lucide-react";
 import { apiFetch } from "@/lib/auth";
 import { useAuth } from "@/components/auth-provider";
@@ -220,7 +221,7 @@ function LogLine({ entry }: { entry: LogEntry }) {
 
 /* ── main page ───────────────────────────────────────────────────────────── */
 
-type PageView = "logs" | "performance";
+type PageView = "logs" | "performance" | "pipeline";
 
 interface FileTiming {
   file_id: string;
@@ -283,6 +284,152 @@ function StatusBadge({ status }: { status: string }) {
       <Icon className={cn("w-3 h-3", status === "running" && "animate-spin")} />
       {status}
     </span>
+  );
+}
+
+/* ── AI Pipeline panel ───────────────────────────────────────────────────── */
+
+/**
+ * Decide a colour class for a single line of the pretty pipeline output.
+ * The backend emits markers like "STEP 1", "STEP 2", "✗", "✓", "SQL", etc.
+ */
+function pipelineLineClass(line: string): string {
+  // Big section dividers
+  if (/^[═]{10,}$/.test(line.trim())) return "text-zinc-600";
+  if (/^[─]{10,}$/.test(line.trim())) return "text-zinc-700";
+
+  // Step headers
+  if (/STEP\s+1\b/.test(line))     return "text-cyan-300 font-semibold";
+  if (/STEP\s+2\b/.test(line))     return "text-blue-300 font-semibold";
+  if (/STEP\s+3\b/.test(line))     return "text-violet-300 font-semibold";
+  if (/STEP\s+4\b/.test(line))     return "text-fuchsia-300 font-semibold";
+  if (/STEP\s+5\b/.test(line))     return "text-amber-300 font-semibold";
+  if (/STEP\s+6\b/.test(line))     return "text-orange-300 font-semibold";
+  if (/STEP\s+FINAL\b/.test(line)) return "text-emerald-300 font-bold";
+
+  // Outcomes
+  if (/^\s*✗/.test(line) || /ERROR|FAILED/.test(line))         return "text-red-400";
+  if (/^\s*✓/.test(line) || /\bdone\b|\bANSWER\b/i.test(line)) return "text-emerald-400";
+  if (/^\s*▶/.test(line))                                       return "text-cyan-200";
+  if (/^\s*•/.test(line))                                       return "text-zinc-300";
+
+  // SQL/tool lines
+  if (/^\s*(SELECT|FROM|WHERE|GROUP BY|ORDER BY|LIMIT|JOIN|WITH)\b/i.test(line))
+    return "text-amber-200";
+
+  return "text-zinc-200";
+}
+
+function PipelinePanel() {
+  const [text, setText] = useState<string>("");
+  const [lines, setLines] = useState<number>(300);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [autoRefresh, setAutoRefresh] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const fetchPipeline = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await apiFetch(`/api/logs/pipeline/tail?n=${lines}`);
+      if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
+      const body = await res.text();
+      setText(body);
+      requestAnimationFrame(() => {
+        if (containerRef.current) {
+          containerRef.current.scrollTop = containerRef.current.scrollHeight;
+        }
+      });
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Failed to fetch pipeline log");
+    } finally {
+      setLoading(false);
+    }
+  }, [lines]);
+
+  useEffect(() => { fetchPipeline(); }, [fetchPipeline]);
+
+  useEffect(() => {
+    if (autoRefresh) {
+      intervalRef.current = setInterval(fetchPipeline, 3000);
+    }
+    return () => {
+      if (intervalRef.current) clearInterval(intervalRef.current);
+    };
+  }, [autoRefresh, fetchPipeline]);
+
+  const renderedLines = text ? text.split("\n") : [];
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* Toolbar */}
+      <div className="border-b border-border px-4 py-2 flex items-center gap-2 shrink-0">
+        <span className="text-xs text-muted-foreground">
+          AI Pipeline trace — every step from query to final answer
+        </span>
+
+        <select
+          value={lines}
+          onChange={(e) => setLines(Number(e.target.value))}
+          className="ml-auto px-2 py-1 rounded bg-surface-raised border border-border text-xs text-foreground"
+        >
+          <option value={100}>last 100 events</option>
+          <option value={300}>last 300 events</option>
+          <option value={500}>last 500 events</option>
+          <option value={1000}>last 1000 events</option>
+        </select>
+
+        <button
+          onClick={() => setAutoRefresh(!autoRefresh)}
+          className={cn(
+            "px-2 py-1 rounded text-xs font-medium transition-colors flex items-center gap-1",
+            autoRefresh
+              ? "bg-green-500/15 text-green-400 border border-green-500/30"
+              : "bg-surface-raised text-muted-foreground hover:text-foreground"
+          )}
+        >
+          <RefreshCw className={cn("w-3 h-3", autoRefresh && "animate-spin")} />
+          {autoRefresh ? "Live (3s)" : "Auto"}
+        </button>
+
+        <button
+          onClick={fetchPipeline}
+          disabled={loading}
+          className="p-1.5 rounded bg-surface-raised text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+        >
+          <RefreshCw className={cn("w-3.5 h-3.5", loading && "animate-spin")} />
+        </button>
+      </div>
+
+      {error && (
+        <div className="mx-4 mt-2 px-3 py-2 rounded bg-red-500/10 border border-red-500/20 text-red-400 text-xs flex items-center gap-2">
+          <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+          {error}
+        </div>
+      )}
+
+      <div
+        ref={containerRef}
+        className="flex-1 overflow-auto bg-[#0b0d12] font-mono text-[11px] leading-[1.45] px-3 py-2"
+      >
+        {renderedLines.length === 0 && !loading && (
+          <div className="flex flex-col items-center justify-center h-full gap-2 text-muted-foreground">
+            <Activity className="w-8 h-8" />
+            <p className="text-sm">No pipeline events yet — send a chat query to see the trace.</p>
+          </div>
+        )}
+        {renderedLines.map((line, i) => (
+          <pre
+            key={i}
+            className={cn("whitespace-pre m-0", pipelineLineClass(line))}
+          >
+            {line || "\u00A0"}
+          </pre>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -425,7 +572,7 @@ const LOG_FILES = [
 
 export default function AdminLogsPage() {
   const { user } = useAuth();
-  const [pageView, setPageView] = useState<PageView>("logs");
+  const [pageView, setPageView] = useState<PageView>("pipeline");
   const [activeFile, setActiveFile] = useState("ai_pipeline.log");
   const [lines, setLines] = useState<LogEntry[]>([]);
   const [totalLines, setTotalLines] = useState(0);
@@ -504,6 +651,18 @@ export default function AdminLogsPage() {
         </div>
         <div className="flex gap-1">
           <button
+            onClick={() => setPageView("pipeline")}
+            className={cn(
+              "px-3 py-1.5 rounded text-xs font-medium transition-colors",
+              pageView === "pipeline"
+                ? "bg-primary text-primary-foreground"
+                : "bg-surface-raised text-muted-foreground hover:text-foreground"
+            )}
+          >
+            <Activity className="w-3.5 h-3.5 inline mr-1" />
+            AI Pipeline
+          </button>
+          <button
             onClick={() => setPageView("logs")}
             className={cn(
               "px-3 py-1.5 rounded text-xs font-medium transition-colors",
@@ -530,7 +689,9 @@ export default function AdminLogsPage() {
         </div>
       </div>
 
-      {pageView === "performance" ? (
+      {pageView === "pipeline" ? (
+        <PipelinePanel />
+      ) : pageView === "performance" ? (
         <PerformancePanel />
       ) : (
       <>

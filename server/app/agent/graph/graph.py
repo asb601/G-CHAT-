@@ -53,9 +53,29 @@ async def _build_agent_context(
     Shared setup for both streaming and non-streaming entry points.
     Returns None if no catalog data exists.
     """
+    # ── STEP 1: USER QUERY RECEIVED ──────────────────────────────────────────
+    pipeline_logger.info(
+        "query_received",
+        query=query,
+        has_conversation_context=bool(conversation_context),
+        conversation_context_preview=(conversation_context[:300] if conversation_context else ""),
+    )
+
     cached = await load_catalog(db)
     if not cached:
+        pipeline_logger.warning("catalog_empty", query=query, reason="no files ingested yet")
         return None
+
+    # ── STEP 2: CATALOG LOADED ───────────────────────────────────────────────
+    pipeline_logger.info(
+        "catalog_loaded",
+        query=query,
+        container=cached["container_name"],
+        file_count=len(cached["catalog"]),
+        parquet_count=len(cached["parquet_paths_all"]),
+        relationship_count=len(cached["relationships"]),
+        files=[f.get("blob_path", "") for f in cached["catalog"]],
+    )
 
     catalog = cached["catalog"]
     relationships = cached["relationships"]
@@ -174,6 +194,16 @@ async def run_agent_query(query: str, db: AsyncSession, *, conversation_context:
                      row_count=len(sql_results),
                      total_duration_ms=total_ms,
                      answer_preview=answer[:200])
+
+    # ── FINAL STEP: ANSWER READY ─────────────────────────────────────────────
+    pipeline_logger.info(
+        "final_answer",
+        query=query,
+        answer=answer,
+        row_count=len(sql_results),
+        tool_calls=tool_calls_made,
+        total_duration_ms=total_ms,
+    )
 
     if not answer and sql_results:
         answer = "Here are the results:"
@@ -344,6 +374,16 @@ async def run_agent_query_stream(
                      row_count=len(sql_results),
                      total_duration_ms=total_ms,
                      answer_len=len(final_answer))
+
+    # ── FINAL STEP: ANSWER READY ─────────────────────────────────────────────
+    pipeline_logger.info(
+        "final_answer",
+        query=query,
+        answer=final_answer,
+        row_count=len(sql_results),
+        tool_calls=tool_calls_made,
+        total_duration_ms=total_ms,
+    )
 
     if not final_answer and sql_results:
         final_answer = "Here are the results:"

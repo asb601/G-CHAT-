@@ -78,6 +78,14 @@ class _PipelinePrettyFormatter(logging.Formatter):
         name = ev.get("event", "")
         ts   = ev.get("timestamp", "")[:19].replace("T", " ")
 
+        if name == "query_received":
+            return self._query_received(ev, ts)
+        if name == "catalog_loaded":
+            return self._catalog_loaded(ev, ts)
+        if name == "catalog_empty":
+            return self._catalog_empty(ev, ts)
+        if name == "final_answer":
+            return self._final_answer(ev, ts)
         if name == "system_prompt_built":
             return self._system_prompt(ev, ts)
         if name in ("llm_input", "llm_stream_input"):
@@ -109,6 +117,71 @@ class _PipelinePrettyFormatter(logging.Formatter):
         # fallback — still pretty-print unknown pipeline events
         return f"\n[PIPELINE {ts}] {name}\n" + json.dumps(ev, indent=2, default=str)[:600]
 
+    # ── step header helper ───────────────────────────────────────────────────────
+    @staticmethod
+    def _step_header(num: str, title: str, ts: str) -> str:
+        title_full = f"  STEP {num}  │  {title}  │  {ts}"
+        return f"\n{_DIV2}\n{title_full}\n{_DIV2}"
+
+    # ── STEP 1: query received ────────────────────────────────────────────────────
+    def _query_received(self, ev: dict, ts: str) -> str:
+        q       = ev.get("query", "")
+        has_ctx = ev.get("has_conversation_context", False)
+        ctx_pre = ev.get("conversation_context_preview", "")
+        lines = [
+            self._step_header("1", "USER QUERY RECEIVED", ts),
+            f"  ▶ Query: {q}",
+            f"  ▶ Conversation context: {'yes' if has_ctx else 'none'}",
+        ]
+        if has_ctx and ctx_pre:
+            lines.append("  ▶ Context preview:")
+            for ln in ctx_pre.splitlines()[:8]:
+                lines.append("      " + ln)
+        return "\n".join(lines)
+
+    # ── STEP 2: catalog loaded ───────────────────────────────────────────────────
+    def _catalog_loaded(self, ev: dict, ts: str) -> str:
+        files = ev.get("files", [])
+        lines = [
+            self._step_header("2", "CATALOG LOADED FROM DB", ts),
+            f"  Container          : {ev.get('container', '')}",
+            f"  Files in catalog   : {ev.get('file_count', 0)}",
+            f"  Parquet-ready files: {ev.get('parquet_count', 0)}",
+            f"  Relationships      : {ev.get('relationship_count', 0)}",
+            "  Files available to the agent:",
+        ]
+        for f in files[:50]:
+            lines.append(f"    • {f}")
+        if len(files) > 50:
+            lines.append(f"    … {len(files) - 50} more")
+        return "\n".join(lines)
+
+    def _catalog_empty(self, ev: dict, ts: str) -> str:
+        return (
+            f"\n{_DIV2}\n"
+            f"  STEP 2  │  CATALOG EMPTY  │  {ts}\n"
+            f"{_DIV2}\n"
+            f"  ✗ No files have been ingested yet — agent cannot answer.\n"
+            f"  Query was: {ev.get('query', '')}"
+        )
+
+    # ── FINAL STEP: answer ready ──────────────────────────────────────────────────
+    def _final_answer(self, ev: dict, ts: str) -> str:
+        ans = str(ev.get("answer", ""))
+        lines = [
+            self._step_header("FINAL", "ANSWER DELIVERED TO USER", ts),
+            f"  Tool calls used : {ev.get('tool_calls', 0)}",
+            f"  Rows returned   : {ev.get('row_count', 0)}",
+            f"  Total time      : {ev.get('total_duration_ms', '?')} ms",
+            f"  Query           : {ev.get('query', '')}",
+            "  Answer:",
+            _DIV,
+        ]
+        for ln in ans.splitlines():
+            lines.append("  " + ln)
+        lines.append(_DIV2)
+        return "\n".join(lines)
+
     # ── individual renderers ──────────────────────────────────────────────────
 
     def _system_prompt(self, ev: dict, ts: str) -> str:
@@ -118,13 +191,12 @@ class _PipelinePrettyFormatter(logging.Formatter):
         ctx     = ev.get("has_conversation_context", False)
         prompt  = ev.get("system_prompt", "")
         lines   = [
-            f"\n{_DIV2}",
-            f"  SYSTEM PROMPT BUILT  [{ts}]",
+            self._step_header("3", "SYSTEM PROMPT BUILT (sent to LLM)", ts),
             f"  Query      : {ev.get('query', '')}",
             f"  Container  : {ev.get('container', '')}",
             f"  Files in catalog  : {files}  |  Parquet-ready: {parquet}",
             f"  Relationships     : {'yes' if rels else 'none'}  |  Conv context: {'yes' if ctx else 'none'}",
-            _DIV2,
+            _DIV,
             "  FULL PROMPT SENT TO LLM:",
             _DIV,
         ]
@@ -174,14 +246,14 @@ class _PipelinePrettyFormatter(logging.Formatter):
         p_tok   = ev.get("prompt_tokens", "?")
         c_tok   = ev.get("completion_tokens", "?")
         dur     = ev.get("duration_ms", "?")
+        title   = f"LLM DECISION (iteration {iter_n})"
         lines   = [
-            f"\n{_DIV}",
-            f"  ◀  LLM OUTPUT  — Iteration {iter_n}  [{ts}]",
-            f"     Tokens: {p_tok} prompt + {c_tok} completion  |  {dur} ms",
+            self._step_header("4", title, ts),
+            f"  Tokens: {p_tok} prompt + {c_tok} completion  |  {dur} ms",
             _DIV,
         ]
         if tcs:
-            lines.append(f"  DECISION: call {len(tcs)} tool(s)")
+            lines.append(f"  ▶ LLM decided to call {len(tcs)} tool(s):")
             for tc in tcs:
                 lines.append(f"    ┌─ tool : {tc.get('name')}")
                 args = tc.get("args", {})
@@ -195,7 +267,7 @@ class _PipelinePrettyFormatter(logging.Formatter):
                         lines.append(f"    │  {k} = {vstr}")
                 lines.append("    └" + "─" * 40)
         elif content:
-            lines.append("  DECISION: generate final answer")
+            lines.append("  ▶ LLM decided: generate final answer (no more tool calls)")
             lines.append("  ┌─ answer:")
             for line in content.splitlines()[:30]:
                 lines.append("  │  " + line)
@@ -238,8 +310,8 @@ class _PipelinePrettyFormatter(logging.Formatter):
     def _sql_start(self, ev: dict, ts: str) -> str:
         sql = ev.get("sql", "")
         lines = [
-            f"\n{_DIV}",
-            f"  SQL QUERY  [{ts}]",
+            self._step_header("5", "DUCKDB SQL EXECUTING", ts),
+            "  SQL being run:",
             _DIV,
         ]
         for line in sql.splitlines():
@@ -254,7 +326,8 @@ class _PipelinePrettyFormatter(logging.Formatter):
         cols     = ev.get("columns", [])
         rows     = ev.get("preview_rows", [])
         lines    = [
-            f"  SQL RESULT  [{ts}]  {returned}/{total} rows  |  {dur} ms",
+            self._step_header("6", "DUCKDB RESULT RETURNED", ts),
+            f"  ✓ {returned}/{total} rows  |  {dur} ms",
             f"  Columns: {', '.join(str(c) for c in cols)}",
         ]
         if rows:
@@ -266,8 +339,10 @@ class _PipelinePrettyFormatter(logging.Formatter):
         sql = ev.get("sql", "")
         err = ev.get("error", "")
         return (
-            f"\n  ✗ SQL ERROR  [{ts}]\n"
-            f"  SQL : {sql[:200]}\n"
+            f"\n{_DIV2}\n"
+            f"  STEP 6  │  ✗ DUCKDB SQL FAILED  │  {ts}\n"
+            f"{_DIV2}\n"
+            f"  SQL : {sql[:300]}\n"
             f"  ERR : {err}\n"
         )
 
@@ -276,14 +351,16 @@ class _PipelinePrettyFormatter(logging.Formatter):
         files = ev.get("matched_files", [])
         descs = ev.get("result_descriptions", [])
         lines = [
-            f"\n  🔍 CATALOG SEARCH  [{ts}]",
+            f"\n  🔍 CATALOG SEARCH  [{ts}]  (tool: search_catalog)",
             f"     Query  : {query}",
-            f"     Matched: {len(files)} file(s)",
+            f"     Matched: {len(files)} file(s) — names only:",
         ]
-        for f, d in zip(files, descs):
-            lines.append(f"     • {f}")
-            if d:
-                lines.append(_wrap(d, indent=8))
+        for f in files:
+            lines.append(f"       • {f}")
+        # descriptions kept short / behind matched list
+        if descs and any(descs):
+            lines.append("     First match summary:")
+            lines.append(_wrap(descs[0], indent=8))
         return "\n".join(lines)
 
     def _schema(self, ev: dict, ts: str) -> str:
