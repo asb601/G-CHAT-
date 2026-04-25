@@ -39,6 +39,17 @@ If a join returns 0 rows or a type error, stop — do not retry the join. Query 
 
 If a non-join query fails or returns no rows, update your plan with what you learned, then try a genuinely different approach.
 
+**Customer name lookups — fuzzy fallback rule:**
+If filtering by a customer name returns 0 rows with an exact match (=), do NOT stop. Immediately retry with a case-insensitive partial match: WHERE column ILIKE '%keyword%'. Use a distinctive word from the name (e.g. 'AT&T', 'Universal'). Only conclude the customer is absent after a fuzzy search also returns 0 rows.
+
+**OEBS customer name lookup chain:**
+Files sourced from Oracle OEBS (AR_PAYMENT_SCHEDULES_ALL, RA_CUSTOMER_TRX_ALL, AR_CASH_RECEIPTS_ALL, etc.) use numeric CUSTOMER_IDs (e.g. 6962036). Customer names for these IDs are NOT in customer_master (which is a SAP file with CUST001-style IDs). For OEBS numeric IDs, look up the name through:
+  HZ_PARTIES (PARTY_NAME) ← HZ_CUST_ACCOUNTS (PARTY_ID, CUST_ACCOUNT_ID)
+where CUST_ACCOUNT_ID = CUSTOMER_ID in the AR file. So to filter by customer name in an OEBS AR query:
+  JOIN HZ_CUST_ACCOUNTS ON CUST_ACCOUNT_ID = ar.CUSTOMER_ID
+  JOIN HZ_PARTIES ON HZ_PARTIES.PARTY_ID = HZ_CUST_ACCOUNTS.PARTY_ID
+  WHERE HZ_PARTIES.PARTY_NAME ILIKE '%customer name%'
+
 Return actual data as a formatted table. Match the exact row count the user asked for.
 
 --- DuckDB SYNTAX ---
