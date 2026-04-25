@@ -263,7 +263,7 @@ function DataTable({ data }: { data: Record<string, unknown>[] }) {
                   <td
                     key={c}
                     className={cn(
-                      "px-3 py-1.5 text-foreground max-w-[280px] truncate",
+                      "px-3 py-1.5 text-foreground max-w-[320px] break-words",
                       isNum ? "tabular-nums text-right" : "text-left"
                     )}
                     title={String(row[c] ?? "")}
@@ -403,7 +403,7 @@ function AssistantMessage({
   onToggle: () => void;
 }) {
   return (
-    <div className="bg-surface border border-border rounded-xl px-4 py-3 max-w-[85%]">
+    <div className="bg-surface border border-border rounded-xl px-4 py-3 w-full min-w-0">
       {msg.error ? (
         <span className="flex items-center gap-2 text-destructive text-sm">
           <AlertCircle className="w-4 h-4 shrink-0" />
@@ -975,7 +975,7 @@ export default function ChatPage() {
               </p>
             </div>
           ) : (
-            <div className="max-w-3xl mx-auto px-4 py-6 space-y-6">
+            <div className="max-w-4xl mx-auto px-3 sm:px-4 py-6 space-y-6">
               {messages.map((msg) => (
                 <div
                   key={msg.id}
@@ -985,17 +985,19 @@ export default function ChatPage() {
                   )}
                 >
                   {msg.role === "user" ? (
-                    <div className="max-w-[80%] rounded-xl px-4 py-3 text-sm leading-relaxed bg-primary text-primary-foreground">
+                    <div className="max-w-[75%] sm:max-w-[65%] rounded-xl px-4 py-3 text-sm leading-relaxed bg-primary text-primary-foreground">
                       {msg.content}
                     </div>
                   ) : (
-                    <AssistantMessage
-                      msg={msg}
-                      isExpanded={expandedMsgId === msg.id}
-                      onToggle={() =>
-                        setExpandedMsgId((prev) => (prev === msg.id ? null : msg.id))
-                      }
-                    />
+                    <div className="flex-1 min-w-0 max-w-full">
+                      <AssistantMessage
+                        msg={msg}
+                        isExpanded={expandedMsgId === msg.id}
+                        onToggle={() =>
+                          setExpandedMsgId((prev) => (prev === msg.id ? null : msg.id))
+                        }
+                      />
+                    </div>
                   )}
                 </div>
               ))}
@@ -1016,7 +1018,7 @@ export default function ChatPage() {
 
         {/* Input */}
         <div className="border-t border-border bg-surface p-4">
-          <form onSubmit={handleSubmit} className="max-w-3xl mx-auto flex items-end gap-2">
+          <form onSubmit={handleSubmit} className="max-w-4xl mx-auto flex items-end gap-2">
             <textarea
               value={input}
               onChange={(e) => setInput(e.target.value)}
