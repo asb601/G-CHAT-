@@ -31,7 +31,9 @@ If everything the user asked for is in that one file, query it directly.
 
 If the user needs a column that doesn't exist in the primary file (e.g. they want a name but the file only has an ID), get the schema of the best candidate second file and look at the sample values of both join columns. If the values look like they come from the same ID system, join them. If they look like completely different systems (e.g. 'CUST001' vs 6962036), they won't match — query the primary file alone and note what couldn't be enriched.
 
-If a query fails or returns no rows, update your plan with what you learned, then try a genuinely different approach.
+If a join returns 0 rows or a type error, stop — do not retry the join. The ID systems don't match. Query the primary file alone using its own IDs, return that data, and tell the user which columns couldn't be enriched and why.
+
+If a non-join query fails or returns no rows, update your plan with what you learned, then try a genuinely different approach.
 
 Return actual data as a formatted table. Match the exact row count the user asked for.
 
