@@ -35,13 +35,16 @@ async def generate_file_description(columns_info: list, sample_rows: list, filen
             }
             for c in columns_info
         ]
-        prompt = f"""You are analyzing a data file named "{filename}".
+        prompt = f"""You are a data catalog expert analyzing a file named "{filename}".
+Your output will be used to match natural language business questions to the correct file.
+Be SPECIFIC and DISCRIMINATIVE — your description must distinguish this file from other similar files.
+
 Return ONLY this JSON with no preamble no markdown:
 {{
-  "summary": "one sentence what this file contains and what questions it answers",
-  "good_for": ["query type 1", "query type 2"],
-  "key_metrics": ["numeric columns for aggregation"],
-  "key_dimensions": ["categorical columns for grouping"],
+  "summary": "2 sentences: (1) what specific business questions this file is the PRIMARY source for — name the exact columns that make it uniquely suited (e.g. 'AMOUNT_DUE_REMAINING tracks open balance', 'STATUS=OP filters open items'); (2) what this file contains that similar-sounding files do NOT have.",
+  "good_for": ["3-6 exact natural language business question phrases this file is the BEST source for — use domain terms like 'AR aging by bucket', 'outstanding invoice balance', 'open receivables', 'top customers by balance' if applicable. Be specific, not generic."],
+  "key_metrics": ["numeric columns used for aggregation and SUM/AVG calculations"],
+  "key_dimensions": ["categorical, status, and ID columns used for filtering and grouping — include their important values where relevant, e.g. STATUS: OP=open CL=closed"],
   "date_range_start": "YYYY-MM-DD or null",
   "date_range_end": "YYYY-MM-DD or null"
 }}
@@ -55,7 +58,7 @@ Sample rows: {json.dumps(sample_rows[:3], default=str)}"""
         response = client.chat.completions.create(
             model=deployment,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=400,
+            max_tokens=600,
             temperature=0,
         )
         duration = elapsed_ms(t)
