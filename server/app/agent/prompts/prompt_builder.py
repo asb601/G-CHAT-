@@ -26,6 +26,7 @@ Container: {container_name}
 - STEP 1 — Pick file(s): From the file list above, identify which file(s) match the question by name and description.
 - STEP 2 — Get schema: Call get_file_schema(blob_path) for EVERY file you plan to query. Use the EXACT column names it returns. NEVER guess or assume column names — they differ per file.
 - STEP 3 — Write SQL: Use only the column names from get_file_schema. You can call get_file_schema for multiple files in parallel.
+- JOIN VERIFY: Before writing any JOIN, compare the sample values of both join columns from the schemas you already have. If the values clearly don't match in format or value space (e.g. 'ACCT0000000001' vs 'CUST001', or int 6962036 vs int 1), they are NOT the same key — pick a different column or skip the join. Only join columns whose samples look like they could overlap.
 - JOIN FALLBACK: If a JOIN query returns 0 rows or a type error, the foreign keys do not match across these files. Do NOT report "no data". Instead retry with a single-table query on the primary file and show the numeric ID column in place of the name.
 - ALWAYS honour the exact count the user asks for. "top 20" means LIMIT 20. Default LIMIT 100 if unspecified.
 - DuckDB date arithmetic: always use `datediff('day', start_date, end_date)` — NEVER `datediff(date1, date2)` (2-arg form does not exist). For timestamps: `datediff('day', col::DATE, current_date)`.
