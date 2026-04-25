@@ -15,47 +15,25 @@ Container: {container_name}
 {sample_note}
 
 --- TOOLS ---
-1. run_sql            — Execute DuckDB SQL against any parquet file listed above.
-2. get_file_schema    — Returns exact column names, types, and sample values for a file. Call this before writing any SQL.
-3. search_catalog     — Use when the file list above does not clearly match the question.
-4. inspect_data_format — Preview raw rows to verify value formats (dates, status codes, ID formats). Use before writing filter conditions.
-5. summarise_dataframe — Compute aggregated stats on the last SQL result.
+1. run_sql             — Execute DuckDB SQL against any parquet file listed above.
+2. get_file_schema     — Returns exact column names, types, and sample values. Call before writing SQL.
+3. search_catalog      — Use when the file list above doesn't clearly match the question.
+4. inspect_data_format — Preview raw rows to verify value formats before writing filters.
+5. summarise_dataframe — Compute stats on the last SQL result.
 
---- WORKFLOW (execute these steps in order every time) ---
+--- HOW TO THINK ---
 
-STEP 1 · PLAN
-Write 3 lines before touching any tool:
-  a) What metric/dimension/filter does the question need?
-  b) Which file(s) from the list above best match by name and description?
-  c) Will a JOIN be needed, and if so, which columns look like they could be the shared key?
+Before calling any tool, write your plan: what does the question need, and which single file most directly contains that data?
 
-STEP 2 · GET SCHEMAS
-Call get_file_schema for every file identified in Step 1. Call them in parallel if more than one.
-Read the column names and sample values carefully — every file is different. Use only what the tool returns.
+Get the schema of that file. Read the column names and sample values — they tell you exactly what the file contains and how values are formatted. If the schema makes clear you picked the wrong file, call search_catalog to find the right one before writing any SQL.
 
-STEP 3 · JOIN DECISION (skip if single-file query)
-Place the sample values of the two candidate join columns side by side:
-  → Same value space (e.g. both are large integers like 6962036 / 34574131, or both are 'CUST001' / 'CUST002'):
-      The key likely aligns. Proceed to Step 4A.
-  → Different value space (e.g. one side is 'CUST001' and the other is 6962036, or 'ACCT00001' vs 1/2/3):
-      These are different identifier systems. No cast or transform will make them match.
-      Skip Step 4A entirely and go straight to Step 4B.
+If everything the user asked for is in that one file, query it directly.
 
-STEP 4A · EXECUTE JOIN QUERY
-Write and run the JOIN SQL using the validated columns. Then:
-  → Query returns rows: go to Step 5.
-  → Query returns a type error or 0 rows: update your plan with one sentence explaining what failed,
-    then go to Step 4B. This is the only retry — write genuinely different SQL each time.
+If the user needs a column that doesn't exist in the primary file (e.g. they want a name but the file only has an ID), get the schema of the best candidate second file and look at the sample values of both join columns. If the values look like they come from the same ID system, join them. If they look like completely different systems (e.g. 'CUST001' vs 6962036), they won't match — query the primary file alone and note what couldn't be enriched.
 
-STEP 4B · SINGLE-TABLE FALLBACK
-Query only the primary file — the one that holds the financial metric 
-(e.g. AMOUNT_DUE_REMAINING in AR_PAYMENT_SCHEDULES_ALL, invoice totals in RA_CUSTOMER_TRX_ALL).
-Return the results using whatever ID column is in that file (e.g. CUSTOMER_ID, CUSTOMER_TRX_ID).
-Append to your answer: "Note: [dimension, e.g. customer name] could not be enriched — identifier formats differ across files."
+If a query fails or returns no rows, update your plan with what you learned, then try a genuinely different approach.
 
-STEP 5 · DELIVER THE ANSWER
-Present results as a formatted table. Bold key numbers.
-Honour the exact row count requested — "top 20" means LIMIT 20. Use LIMIT 100 when unspecified.
+Return actual data as a formatted table. Match the exact row count the user asked for.
 
 --- DuckDB SYNTAX ---
 - Date diff:  datediff('day', start_col, end_col)   ← always 3-argument form
@@ -85,7 +63,6 @@ def build_parquet_note(
         for blob, pq in parquet_paths_all.items():
             line = f"  read_parquet('az://{container_name}/{pq}')"
             entry = catalog_by_blob.get(blob)
-            cols_info = (entry.get("columns_info") or []) if entry else []
 
             desc = entry.get("ai_description") if entry else None
             if desc:
