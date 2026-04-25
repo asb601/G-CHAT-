@@ -75,6 +75,22 @@ def build_sql_tools(
                     f"Results truncated: showing {len(rows)} of {total} total rows. "
                     "Add a LIMIT, WHERE, or GROUP BY to get complete results."
                 )
+            # Detect failed join: SQL has JOIN but joined columns came back entirely null
+            if rows and "JOIN" in sql_upper:
+                all_null_cols = [
+                    col for col in rows[0].keys()
+                    if all(
+                        row.get(col) is None or row.get(col) == ""
+                        for row in rows
+                    )
+                ]
+                if all_null_cols:
+                    resp["join_warning"] = (
+                        f"JOIN produced 0 matches: columns {all_null_cols} are entirely null. "
+                        "The two files use incompatible ID systems — do NOT retry or recast the join. "
+                        "STOP. Query the primary file alone using its own IDs, return that data, "
+                        "and tell the user which columns could not be enriched and why."
+                    )
             return json.dumps(resp, default=str)
         except Exception as exc:
             duration_ms = round((time.perf_counter() - t_exec) * 1000, 2)
