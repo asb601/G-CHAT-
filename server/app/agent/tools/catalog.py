@@ -4,9 +4,20 @@ from __future__ import annotations
 import json
 from langchain_core.tools import tool
 
-from app.agent.search_normalization import tokenize_search_query
+from app.agent.search_normalization import (
+    is_lookup_file,
+    tokenize_search_query,
+)
 from app.core.logger import pipeline_logger
 from app.retrieval.embeddings import build_search_text
+
+# Hard cap on how many files search_catalog returns to the LLM.
+_MAX_RESULTS = 15
+# How many lookup / master / dimension files to surface unconditionally,
+# even if they did not score on the user's query tokens.  Protects against
+# vocabulary mismatches between the user's question (e.g. SAP "customer
+# master") and the file's metadata (e.g. Oracle EBS "parties / party_name").
+_LOOKUP_PAD_SLOTS = 5
 
 
 def _match_score(query: str, file_entry: dict) -> tuple[int, list[str]]:
@@ -53,45 +64,72 @@ def build_catalog_tools(
         if not catalog:
             return json.dumps({"error": "No files have been ingested yet."})
 
-        results = []
+        def _entry(f: dict, score: int, matched_terms: list[str]) -> dict:
+            return {
+                "match_score": score,
+                "matched_terms": matched_terms,
+                "blob_path": f["blob_path"],
+                "sql_path": _sql_path(f["blob_path"]),
+                "description": f.get("ai_description", ""),
+                "columns": [c["name"] for c in (f.get("columns_info") or [])],
+                "key_metrics": f.get("key_metrics") or [],
+                "key_dimensions": f.get("key_dimensions") or [],
+                "good_for": f.get("good_for") or [],
+                "date_range": f"{f.get('date_range_start')} → {f.get('date_range_end')}",
+            }
+
+        # Score every file once.  Keep all files (do NOT drop score==0) so
+        # vocabulary-mismatched lookup tables remain reachable.  Sort by score
+        # descending; lookup-files with score 0 are then promoted ahead of
+        # other zero-score files via a stable secondary key.
+        scored: list[tuple[int, bool, dict, list[str]]] = []
         for f in catalog:
             score, matched_terms = _match_score(query, f)
-            if score > 0:
-                results.append({
-                    "match_score": score,
-                    "matched_terms": matched_terms,
-                    "blob_path": f["blob_path"],
-                    "sql_path": _sql_path(f["blob_path"]),
-                    "description": f.get("ai_description", ""),
-                    "columns": [c["name"] for c in (f.get("columns_info") or [])],
-                    "key_metrics": f.get("key_metrics") or [],
-                    "key_dimensions": f.get("key_dimensions") or [],
-                    "good_for": f.get("good_for") or [],
-                    "date_range": f"{f.get('date_range_start')} → {f.get('date_range_end')}",
-                })
+            scored.append((score, is_lookup_file(f), f, matched_terms))
 
-        results.sort(key=lambda item: (-item.get("match_score", 0), item["blob_path"]))
+        # Sort: higher score first; among equal scores, prefer lookup tables
+        # (they are usually the discovery target when the user asks about an
+        # entity by name).  Final tiebreaker = blob_path for determinism.
+        scored.sort(
+            key=lambda x: (-x[0], 0 if x[1] else 1, x[2]["blob_path"]),
+        )
 
+        matched = [_entry(f, s, mt) for (s, _is_lk, f, mt) in scored if s > 0]
+        matched_blobs = {r["blob_path"] for r in matched}
+
+        # Always surface up to _LOOKUP_PAD_SLOTS lookup-style files that the
+        # token-match step missed.  Generic, query-agnostic — handles ERP
+        # vocabulary gaps (customer ↔ party, account ↔ supplier, etc.).
+        lookup_pad = []
+        for s, is_lk, f, mt in scored:
+            if not is_lk:
+                continue
+            if f["blob_path"] in matched_blobs:
+                continue
+            lookup_pad.append(_entry(f, s, mt))
+            if len(lookup_pad) >= _LOOKUP_PAD_SLOTS:
+                break
+
+        results = matched + lookup_pad
+
+        # Final fallback: nothing matched and no lookup files exist either —
+        # fall back to a generic top-of-catalog slice so the agent at least
+        # sees something.
         if not results:
-            results = [
-                {
-                    "blob_path": f["blob_path"],
-                    "sql_path": _sql_path(f["blob_path"]),
-                    "description": f.get("ai_description", ""),
-                    "columns": [c["name"] for c in (f.get("columns_info") or [])],
-                }
-                for f in catalog[:10]
-            ]
+            results = [_entry(f, 0, []) for f in catalog[: _MAX_RESULTS]]
+
+        results = results[: _MAX_RESULTS]
 
         pipeline_logger.info(
             "search_catalog",
             query=query,
             files_found=len(results),
             matched_files=[r["blob_path"] for r in results],
+            lookup_padded=[r["blob_path"] for r in lookup_pad],
             result_descriptions=[r.get("description", "")[:120] for r in results],
         )
 
-        return json.dumps({"files": results[:15], "total": len(results)}, default=str)
+        return json.dumps({"files": results, "total": len(results)}, default=str)
 
     @tool
     def get_file_schema(blob_path: str) -> str:

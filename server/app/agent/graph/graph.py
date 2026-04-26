@@ -55,39 +55,10 @@ _SHORTLIST_TOP_K = 12
 # like "invoice" / "amount" / "ageing".
 _LOOKUP_RESERVED_SLOTS = 3
 
-# Filename / description signals that mark a file as a master / lookup table.
-# Pure structural heuristic — applies to any catalog, any query.
-_LOOKUP_KEYWORDS = (
-    "master", "masters", "parties", "party", "accounts", "account",
-    "lookup", "directory", "reference", "dimension",
-)
-# Column-name suffixes that indicate the column holds entity names / labels —
-# the kind of column you would resolve a literal user-supplied value against.
-_NAME_COLUMN_SUFFIXES = ("_name", "name", "_desc", "_description", "_label", "_title")
-
-
-def _is_lookup_file(entry: dict) -> bool:
-    """Heuristic: does this file look like a master / lookup / dimension table?
-
-    A file qualifies if ANY of:
-      - blob_path contains a lookup keyword (master, parties, lookup, dim_, ...)
-      - ai_description contains a lookup keyword
-      - it has at least one column whose name ends in _NAME / _DESC / _LABEL
-        (these are the universal markers of an entity-name column)
-    """
-    blob = (entry.get("blob_path") or "").lower()
-    if any(kw in blob for kw in _LOOKUP_KEYWORDS):
-        return True
-    desc = (entry.get("ai_description") or "").lower()
-    if any(kw in desc for kw in _LOOKUP_KEYWORDS):
-        return True
-    for col in (entry.get("columns_info") or []):
-        if not isinstance(col, dict):
-            continue
-        name = (col.get("name") or "").lower()
-        if any(name.endswith(sfx) for sfx in _NAME_COLUMN_SUFFIXES):
-            return True
-    return False
+# Lookup-file detection lives in search_normalization so the search_catalog
+# tool can apply the same heuristic.  Re-exported here under the old private
+# name to keep call sites unchanged.
+from app.agent.search_normalization import is_lookup_file as _is_lookup_file  # noqa: E402
 
 
 # ── Shared context builder ────────────────────────────────────────────────────
