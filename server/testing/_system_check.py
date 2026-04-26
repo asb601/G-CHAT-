@@ -15,6 +15,9 @@ PASS = 0
 FAIL = 0
 
 
+
+
+
 def ok(label):
     global PASS
     PASS += 1
