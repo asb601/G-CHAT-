@@ -44,6 +44,51 @@ _stores_lock = threading.Lock()
 
 _NO_FILES_MSG = "No files have been ingested yet. Please upload and ingest some files first."
 
+# How many files to surface in the prompt shortlist.
+# 8 was too tight for queries that need both a metric file and a lookup file.
+# 12 still fits comfortably in the prompt window for very large catalogs.
+_SHORTLIST_TOP_K = 12
+
+# How many slots in the shortlist to reserve for "lookup / master" files —
+# generic dimension tables (parties, accounts, masters, dim_*) that almost
+# every entity-lookup query needs but which never rank well on metric tokens
+# like "invoice" / "amount" / "ageing".
+_LOOKUP_RESERVED_SLOTS = 3
+
+# Filename / description signals that mark a file as a master / lookup table.
+# Pure structural heuristic — applies to any catalog, any query.
+_LOOKUP_KEYWORDS = (
+    "master", "masters", "parties", "party", "accounts", "account",
+    "lookup", "directory", "reference", "dimension",
+)
+# Column-name suffixes that indicate the column holds entity names / labels —
+# the kind of column you would resolve a literal user-supplied value against.
+_NAME_COLUMN_SUFFIXES = ("_name", "name", "_desc", "_description", "_label", "_title")
+
+
+def _is_lookup_file(entry: dict) -> bool:
+    """Heuristic: does this file look like a master / lookup / dimension table?
+
+    A file qualifies if ANY of:
+      - blob_path contains a lookup keyword (master, parties, lookup, dim_, ...)
+      - ai_description contains a lookup keyword
+      - it has at least one column whose name ends in _NAME / _DESC / _LABEL
+        (these are the universal markers of an entity-name column)
+    """
+    blob = (entry.get("blob_path") or "").lower()
+    if any(kw in blob for kw in _LOOKUP_KEYWORDS):
+        return True
+    desc = (entry.get("ai_description") or "").lower()
+    if any(kw in desc for kw in _LOOKUP_KEYWORDS):
+        return True
+    for col in (entry.get("columns_info") or []):
+        if not isinstance(col, dict):
+            continue
+        name = (col.get("name") or "").lower()
+        if any(name.endswith(sfx) for sfx in _NAME_COLUMN_SUFFIXES):
+            return True
+    return False
+
 
 # ── Shared context builder ────────────────────────────────────────────────────
 
@@ -95,17 +140,52 @@ async def _build_agent_context(
     # The full catalog is still passed to build_catalog_tools so search_catalog
     # can still scan all files if needed.
     retrieved_with_scores = []
+    retrieval_error: str | None = None
     if user_id:
         try:
             retrieved_with_scores = await retrieve_with_scores(
-                query, user_id, is_admin, db, top_k=8
+                query, user_id, is_admin, db, top_k=_SHORTLIST_TOP_K
             )
         except Exception as exc:
-            chat_logger.warning("retrieval_error_fallback", error=str(exc)[:200])
+            retrieval_error = str(exc)[:200]
+            chat_logger.warning("retrieval_error_fallback", error=retrieval_error)
+
+    # ── In-memory keyword scorer (used for fallback AND for lookup-slot fill) ─
+    q_words = tokenize_search_query(query)
+
+    def _kw_score(e: dict) -> int:
+        search_text = build_search_text(e).lower()
+        score = sum(1 for w in q_words if w in search_text)
+
+        column_text = " ".join(
+            c.get("name", "")
+            for c in (e.get("columns_info") or [])
+            if isinstance(c, dict)
+        ).lower()
+        score += sum(2 for w in q_words if w in column_text)
+
+        blob_path = (e.get("blob_path") or "").lower()
+        score += sum(1 for w in q_words if w in blob_path)
+        return score
 
     if retrieved_with_scores:
         retrieved_ids = {meta.file_id for meta, _ in retrieved_with_scores}
         catalog = [e for e in full_catalog if e.get("file_id") in retrieved_ids]
+        # ── Reserve slots for master / lookup files ───────────────────────────
+        # Retrieval ranks by token relevance, which under-weights name-lookup
+        # tables for queries about metrics ("show X for entity Y"). Make sure
+        # at least a few generic master/lookup tables make it into the prompt.
+        already_in = {e.get("blob_path") for e in catalog}
+        lookup_pool = [
+            e for e in full_catalog
+            if _is_lookup_file(e) and e.get("blob_path") not in already_in
+        ]
+        # Rank lookup pool by keyword score (still query-aware: a "supplier
+        # master" outranks "calendar lookup" when the query is about suppliers).
+        lookup_pool.sort(key=_kw_score, reverse=True)
+        injected_lookups = lookup_pool[:_LOOKUP_RESERVED_SLOTS]
+        catalog = catalog + injected_lookups
+
         parquet_paths_all = {
             k: v for k, v in all_parquet_paths.items()
             if k in {e.get("blob_path") for e in catalog}
@@ -116,37 +196,36 @@ async def _build_agent_context(
             total_files=len(full_catalog),
             retrieved_files=len(catalog),
             top_scores=[(meta.file_id, round(s, 4)) for meta, s in retrieved_with_scores[:5]],
+            lookup_slots_added=[e.get("blob_path") for e in injected_lookups],
         )
     else:
-        # Fallback: retrieval returned 0 — do in-memory keyword match on catalog
-        # so we still show at most top_k=8 files, not all 27.
-        q_words = tokenize_search_query(query)
-
-        def _score(e: dict) -> int:
-            search_text = build_search_text(e).lower()
-            score = sum(1 for w in q_words if w in search_text)
-
-            column_text = " ".join(
-                c.get("name", "")
-                for c in (e.get("columns_info") or [])
-                if isinstance(c, dict)
-            ).lower()
-            score += sum(2 for w in q_words if w in column_text)
-
-            blob_path = (e.get("blob_path") or "").lower()
-            score += sum(1 for w in q_words if w in blob_path)
-            return score
-
-        scored = sorted(full_catalog, key=_score, reverse=True)
-        catalog = scored[:8]
+        # Fallback: retrieval returned 0 (or errored) — do in-memory keyword
+        # match on the catalog so we still show a reasonable shortlist.
+        scored = sorted(full_catalog, key=_kw_score, reverse=True)
+        # Take the top metric/transactional matches by keyword, then enrich
+        # with the highest-scoring lookup files so name-resolution queries
+        # always have a master table to consult.
+        primary = scored[: _SHORTLIST_TOP_K - _LOOKUP_RESERVED_SLOTS]
+        primary_blobs = {e.get("blob_path") for e in primary}
+        lookup_pool = [
+            e for e in scored
+            if _is_lookup_file(e) and e.get("blob_path") not in primary_blobs
+        ]
+        catalog = primary + lookup_pool[:_LOOKUP_RESERVED_SLOTS]
         parquet_paths_all = {
             k: v for k, v in all_parquet_paths.items()
             if k in {e.get("blob_path") for e in catalog}
         }
+        if retrieval_error:
+            reason = f"retrieval_error: {retrieval_error}"
+        elif user_id:
+            reason = "no retrieval results"
+        else:
+            reason = "no user_id"
         pipeline_logger.info(
             "retrieval_fallback",
             query=query,
-            reason="no retrieval results" if user_id else "no user_id",
+            reason=reason,
             total_files=len(full_catalog),
             fallback_files=[e.get("blob_path") for e in catalog],
         )
