@@ -14,6 +14,7 @@ _QUERY_INTENT_STOPWORDS = {
 }
 
 
+
 @lru_cache(maxsize=1)
 def _english_stopwords() -> frozenset[str]:
     library_words = {word.casefold() for word in stopwords.stopwords("en")}
