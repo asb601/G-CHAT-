@@ -68,8 +68,10 @@ The file list above is a retrieval shortlist of {shortlist_count} of {total_file
 When the user asks about a specific entity (a customer, supplier, party, account, material, invoice number, receipt number, etc.):
   1. Identify the type of master / lookup file that would naturally hold that entity's name as a row value (customer master, party name, account master, item master, etc.).
   2. If a strong candidate is in the shortlist, get_file_schema on it. If not, call search_catalog with semantic terms describing that file type (e.g. "party name", "customer account master", "supplier master", "account lookup").
-  3. Try an exact filter on the value. If 0 rows, retry case-insensitive partial match with distinctive tokens.
-  4. If still 0 rows, call search_catalog for alternate files BEFORE concluding the value is absent. Many systems store the same entity under several files (master, parties, accounts, sites). Check at least 2 candidate schemas before giving up.
+  3. **Verify before filtering.** Look at the sample_values returned by get_file_schema for the name column you intend to filter on. If the samples (e.g. 'Account 1', 'XYZ-001', 'CUST001') do not resemble the user's literal value (e.g. 'AT&T Universal Card'), this file does NOT contain the entity — do NOT run a LIKE filter on it; pivot via search_catalog to a different lookup file instead. Only run the filter when the sample format plausibly matches the literal.
+  4. Try an exact filter on the value. If 0 rows, retry case-insensitive partial match with distinctive tokens (e.g. just 'AT&T' instead of the full name).
+  5. If still 0 rows, call search_catalog for alternate files BEFORE concluding the value is absent. Many systems store the same entity under several files (master, parties, accounts, sites). Check at least 2 candidate schemas before giving up.
+  6. Never repeat a filter you already ran (same file + same column + same predicate). If the previous query returned 0 rows, change the file or change the column — do not change only whitespace or quoting and re-submit.
 
 search_catalog searches file metadata only (filenames, descriptions, columns). It does NOT search row values. To find a row value, you must filter inside an actual file.
 

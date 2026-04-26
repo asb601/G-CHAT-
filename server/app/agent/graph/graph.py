@@ -431,45 +431,18 @@ async def run_agent_query_stream(
 
             elif kind == "on_chat_model_start":
                 # New LLM call starting — reset the buffer.
+                # NOTE: We do NOT log the input here. agent_node already emits
+                # `llm_input` for the same invocation; logging again here would
+                # duplicate every LLM Input/Decision panel in the UI and made
+                # the pipeline trace look like the model was being called twice.
                 pending_chunks = []
-                # Log the full message list going into the LLM for this iteration
-                raw_msgs = event["data"].get("input", {}).get("messages", [])
-                # langgraph batches messages as [[msg1, msg2, ...]]
-                flat = raw_msgs[0] if raw_msgs and isinstance(raw_msgs[0], list) else raw_msgs
-                pipeline_logger.debug(
-                    "llm_stream_input",
-                    iteration=tool_calls_made,
-                    message_count=len(flat),
-                    messages=[
-                        {
-                            "type": type(m).__name__,
-                            "content": str(m.content) if hasattr(m, "content") else "",
-                            "tool_calls": [
-                                {"name": tc.get("name"), "args": tc.get("args")}
-                                for tc in (getattr(m, "tool_calls", None) or [])
-                            ],
-                        }
-                        for m in flat
-                    ],
-                )
 
             elif kind == "on_chat_model_end":
-                # Log the complete LLM response for this iteration
+                # Determine whether this LLM turn produced tool calls so we know
+                # whether to flush the buffered chunks. Do NOT log the response
+                # here — agent_node already emits `llm_output` for the same call.
                 resp = event["data"].get("output")
                 resp_tool_calls = getattr(resp, "tool_calls", None) if resp else None
-                if resp:
-                    usage = getattr(resp, "usage_metadata", None)
-                    pipeline_logger.debug(
-                        "llm_stream_output",
-                        iteration=tool_calls_made,
-                        content=str(resp.content) if resp.content else "",
-                        tool_calls=[
-                            {"name": tc.get("name"), "args": tc.get("args")}
-                            for tc in (resp_tool_calls or [])
-                        ],
-                        prompt_tokens=usage.get("input_tokens", 0) if usage else 0,
-                        completion_tokens=usage.get("output_tokens", 0) if usage else 0,
-                    )
 
                 # Flush buffered chunks ONLY if this LLM turn produced no tool
                 # calls — i.e. it is the final answer the user should see.
