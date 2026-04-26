@@ -31,6 +31,10 @@ jobs:
             ${{ secrets.SERVER_ENV }}
             ENVEOF
 
+            # Sync dependencies so any new packages in uv.lock are installed
+            cd ~/G-CHAT-/server
+            uv sync --frozen
+
             # Restart backend service (creates all tables on first start)
             sudo systemctl restart gchat
 

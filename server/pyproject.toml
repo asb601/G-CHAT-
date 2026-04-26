@@ -28,6 +28,7 @@ dependencies = [
     "langchain-community>=0.3",
     "pgvector>=0.3.6",
     "stopwordsiso>=0.6.1",
+    "setuptools>=68",
 ]
 
 [build-system]
