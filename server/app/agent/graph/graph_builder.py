@@ -135,6 +135,65 @@ def _had_zero_row_sql(messages: list) -> bool:
     return False
 
 
+def _had_sql_error(messages: list) -> bool:
+    """True if any prior run_sql ToolMessage returned a SQL error payload.
+
+    Catches type-conversion / cast failures (string vs int join keys),
+    syntax errors, missing-column errors, etc. We treat these the same as
+    a 0-row result for nudge purposes — the agent should discover an
+    alternate file rather than report the raw error and surrender.
+    """
+    for m in messages:
+        if isinstance(m, ToolMessage) and getattr(m, "name", "") == "run_sql":
+            content = m.content if isinstance(m.content, str) else str(m.content)
+            if '"error"' in content:
+                return True
+    return False
+
+
+_RELATIVE_TIME_MARKERS = (
+    "CURRENT_DATE", "CURRENT_TIMESTAMP", "NOW(", "GETDATE(",
+    "INTERVAL ", "DATE_SUB", "DATE_ADD", "DATEADD(",
+)
+
+
+def _zero_rows_only_from_relative_time(messages: list) -> bool:
+    """True if every zero-row run_sql had a relative-time predicate.
+
+    An empty result for a query like 'last 7 days' against a historical
+    dataset is a LEGITIMATE empty answer, not a missing-entity bug.
+    Forcing search_catalog discovery in that case wastes the rest of the
+    tool budget and produces stacked surrender messages — we suppress the
+    nudge and let the model report the empty window directly.
+    """
+    saw_zero = False
+    for m in messages:
+        if not (isinstance(m, ToolMessage) and getattr(m, "name", "") == "run_sql"):
+            continue
+        content = m.content if isinstance(m.content, str) else str(m.content)
+        is_zero = '"row_count": 0' in content or '"total_rows": 0' in content
+        if not is_zero:
+            continue
+        saw_zero = True
+        # Locate the SQL string for this ToolMessage in the preceding AIMessage.
+        tcid = getattr(m, "tool_call_id", None)
+        sql_text = ""
+        if tcid:
+            for prev in messages:
+                if not isinstance(prev, AIMessage):
+                    continue
+                for tc in (getattr(prev, "tool_calls", None) or []):
+                    if tc.get("id") == tcid:
+                        sql_text = (tc.get("args") or {}).get("sql", "") or ""
+                        break
+                if sql_text:
+                    break
+        upper = sql_text.upper()
+        if not any(marker in upper for marker in _RELATIVE_TIME_MARKERS):
+            return False  # at least one zero-row SQL was NOT relative-time
+    return saw_zero
+
+
 def _called_search_catalog(messages: list) -> bool:
     """True if search_catalog has been invoked at any point this session."""
     return any(
@@ -165,15 +224,17 @@ def _should_force_broaden(state: AgentState) -> bool:
 
     Triggers when ALL of these hold:
       * the last message is a final AIMessage with no further tool calls
-      * at least one run_sql happened and ALL run_sql calls returned 0 rows
-        (so we tried the shortlist files and got nothing)
-      * search_catalog has NOT been called yet (discovery never broadened)
+      * at least one run_sql either returned 0 rows OR errored
+        (a JOIN cast error means we never even got to query the data;
+        treat it the same as 0 rows so the agent gets nudged to find
+        a compatible alternate file rather than surrender)
+      * NO run_sql call returned > 0 rows
+      * search_catalog has NOT been called yet
+      * the failures were not exclusively relative-time-window queries
+        (an empty 'last 7 days' result against historical data is a
+        legitimate empty answer, not a missing entity)
       * we have not already forced this nudge in this session
       * we still have tool budget remaining
-
-    The phrasing of the model's final answer is NOT inspected — the model can
-    surrender silently or with any wording. The structural signal (zero-row
-    SQL + no catalog discovery) is sufficient.
     """
     if state.get("broaden_nudges", 0) >= 1:
         return False
@@ -187,12 +248,17 @@ def _should_force_broaden(state: AgentState) -> bool:
         return False
     if getattr(last, "tool_calls", None):
         return False
-    if not _had_zero_row_sql(msgs):
+    had_zero = _had_zero_row_sql(msgs)
+    had_err = _had_sql_error(msgs)
+    if not (had_zero or had_err):
         return False
     if _had_any_nonzero_sql(msgs):
         # The model already got real rows from somewhere — don't second-guess.
         return False
     if _called_search_catalog(msgs):
+        return False
+    # Suppress nudge for legitimate empty-time-window results
+    if had_zero and not had_err and _zero_rows_only_from_relative_time(msgs):
         return False
     return True
 
