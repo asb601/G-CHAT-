@@ -18,18 +18,30 @@ Container: {container_name}
 1. run_sql             — Execute DuckDB SQL against any parquet file listed above.
 2. get_file_schema     — Returns exact column names, types, and sample values. Call before writing SQL.
 3. search_catalog      — Use when the file list above doesn't clearly match the question.
-4. inspect_data_format — Preview raw rows to verify value formats before writing filters.
+4. inspect_data_format — Preview raw rows for a specific file to verify value formats before writing filters.
 5. summarise_dataframe — Compute stats on the last SQL result.
 
 --- HOW TO THINK ---
 
-Before calling any tool, write your plan: what does the question need, and which single file most directly contains that data?
+Treat the file list below as a starting shortlist, not ground truth. If the needed filter column, literal value, or join path is not obvious from the shortlist schemas, call search_catalog.
+
+Before calling any tool, write your plan: identify the primary metric file, the file that likely contains the user's filter value as-is, and any optional enrichment file.
 
 Get the schema of that file. Read the column names and sample values — they tell you exactly what the file contains and how values are formatted. If the schema makes clear you picked the wrong file, call search_catalog to find the right one before writing any SQL.
 
 If everything the user asked for is in that one file, query it directly.
 
 If the user needs a column that doesn't exist in the primary file (e.g. they want a name but the file only has an ID), get the schema of the best candidate second file.
+
+search_catalog searches file metadata only: file names, descriptions, and column names. It does NOT search actual row values.
+
+When you need to resolve a literal value (customer name, invoice number, receipt number, material code, account name, etc.), do NOT call search_catalog with only the raw literal. Search semantically for the type of file that would contain that value (for example: customer master, party name, account, invoice header, receipt details), then inspect schemas of the best candidates.
+
+For any literal value filter (customer name, invoice number, receipt number, material, account, etc.), first verify which file is most likely to contain that value directly. Try an exact filter first. If that returns 0 rows, retry with a case-insensitive partial match using distinctive tokens. If it still returns 0 rows, call search_catalog for alternate files or synonym columns before concluding the value is absent.
+
+Only aggregate, rank, or join after you have resolved the filter value to the correct file or key.
+
+Never conclude that a value is absent, or that no link exists between files, from search_catalog output alone. search_catalog is only for discovery. Before concluding failure, you must inspect at least one candidate schema and, if a likely value column exists, run a small lookup query against that file.
 
 Before writing any JOIN SQL, you MUST explicitly state: "Primary file join column samples: [values]. Second file join column samples: [values]. These look like the SAME / DIFFERENT ID systems." Only then decide:
 - Same system → write the join.
@@ -38,9 +50,6 @@ Before writing any JOIN SQL, you MUST explicitly state: "Primary file join colum
 If a join returns 0 rows or a type error, stop — do not retry the join. Query the primary file alone using its own IDs, return that data, and tell the user which columns couldn't be enriched and why.
 
 If a non-join query fails or returns no rows, update your plan with what you learned, then try a genuinely different approach.
-
-**Customer name lookups — fuzzy fallback rule:**
-If filtering by a customer name returns 0 rows with an exact match (=), do NOT stop. Immediately retry with a case-insensitive partial match: WHERE column ILIKE '%keyword%'. Use a distinctive word from the name. If that also returns 0 rows, call search_catalog to find other files that may contain the customer name before concluding the customer is absent.
 
 Return actual data as a formatted table. Match the exact row count the user asked for.
 
@@ -76,13 +85,16 @@ def build_parquet_note(
             desc = entry.get("ai_description") if entry else None
             if desc:
                 line += f"\n    Description: {desc}"
-            good_for = (entry.get("good_for") or []) if entry else []
-            if good_for:
-                line += f"\n    Good for: {', '.join(good_for[:5])}"
+            key_dimensions = (entry.get("key_dimensions") or []) if entry else []
+            if key_dimensions:
+                line += f"\n    Key dimensions: {', '.join(key_dimensions[:6])}"
+            key_metrics = (entry.get("key_metrics") or []) if entry else []
+            if key_metrics:
+                line += f"\n    Key metrics: {', '.join(key_metrics[:6])}"
             lines.append(line)
 
         note = (
-            "Available parquet files (use directly in run_sql — no search_catalog needed):\n"
+            "Initial shortlist of likely parquet files:\n"
             + "\n".join(lines)
             + "\nParquet covers the FULL dataset. Use it for any ordering, filtering, counting, or row retrieval."
         )
@@ -97,9 +109,12 @@ def build_parquet_note(
                 desc = entry.get("ai_description")
                 if desc:
                     csv_line += f"\n    Description: {desc}"
-                good_for = entry.get("good_for") or []
-                if good_for:
-                    csv_line += f"\n    Good for: {', '.join(good_for[:5])}"
+                key_dimensions = entry.get("key_dimensions") or []
+                if key_dimensions:
+                    csv_line += f"\n    Key dimensions: {', '.join(key_dimensions[:6])}"
+                key_metrics = entry.get("key_metrics") or []
+                if key_metrics:
+                    csv_line += f"\n    Key metrics: {', '.join(key_metrics[:6])}"
                 csv_lines.append(csv_line)
             note += (
                 "\n\nCSV-only files (no parquet — may be slower for large files):\n"
@@ -122,7 +137,7 @@ def build_system_prompt(
     parquet_paths_all: dict[str, str],
     parquet_blob_path: str | None,
     container_name: str,
-    sample_rows: list,
+    sample_rows_by_blob: dict[str, list],
     conversation_context: str = "",
 ) -> str:
     """Assemble the full system prompt for the agent."""
@@ -131,10 +146,10 @@ def build_system_prompt(
     )
 
     sample_note = ""
-    if sample_rows:
+    if sample_rows_by_blob:
         sample_note = (
-            f"\nData format preview: {len(sample_rows)} example rows from ingest available via"
-            " inspect_data_format() — use to understand column formats before writing SQL."
+            f"\nData format preview: ingest-time example rows are available for {len(sample_rows_by_blob)} files via"
+            " inspect_data_format(blob_path, n=5) — use this only after you know which file you want to inspect."
         )
 
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(

@@ -44,7 +44,7 @@ async def load_catalog(
     and parquet_paths_all). None / empty list = no filtering (admin or unset).
 
     Returns dict with keys: catalog, connection_string,
-    container_name, parquet_blob_path, parquet_paths_all, sample_rows.
+    container_name, parquet_blob_path, parquet_paths_all, sample_rows_by_blob.
     Returns None if no files exist.
     """
     global _catalog_cache, _catalog_cache_time
@@ -110,7 +110,11 @@ async def load_catalog(
         if ar.parquet_blob_path and meta.blob_path:
             parquet_paths_all[meta.blob_path] = ar.parquet_blob_path
 
-    sample_rows = first_meta.sample_rows or []
+    sample_rows_by_blob = {
+        meta.blob_path: (meta.sample_rows or [])
+        for meta in all_meta
+        if meta.blob_path
+    }
 
     result = {
         "catalog": catalog,
@@ -118,7 +122,7 @@ async def load_catalog(
         "container_name": container.container_name,
         "parquet_blob_path": parquet_blob_path,
         "parquet_paths_all": parquet_paths_all,
-        "sample_rows": sample_rows,
+        "sample_rows_by_blob": sample_rows_by_blob,
     }
 
     with _catalog_lock:
@@ -137,10 +141,12 @@ async def load_catalog(
         }
         filtered_catalog = [e for e in catalog if e["blob_path"] in visible_blobs]
         filtered_parquets = {k: v for k, v in parquet_paths_all.items() if k in visible_blobs}
+        filtered_samples = {k: v for k, v in sample_rows_by_blob.items() if k in visible_blobs}
         return {
             **result,
             "catalog": filtered_catalog,
             "parquet_paths_all": filtered_parquets,
+            "sample_rows_by_blob": filtered_samples,
         }
 
     return result

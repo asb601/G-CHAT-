@@ -2,9 +2,43 @@
 from __future__ import annotations
 
 import json
+import re
 from langchain_core.tools import tool
 
 from app.core.logger import pipeline_logger
+from app.retrieval.embeddings import build_search_text
+
+
+_SEARCH_STOPWORDS = {
+    "a", "an", "and", "are", "by", "for", "from", "given", "how", "in", "into",
+    "is", "it", "last", "of", "on", "or", "show", "the", "to", "what", "with",
+}
+
+
+def _tokenize(text: str) -> list[str]:
+    return [
+        token for token in re.split(r"[^a-z0-9_]+", text.lower())
+        if len(token) >= 2 and token not in _SEARCH_STOPWORDS
+    ]
+
+
+def _match_score(query: str, file_entry: dict) -> tuple[int, list[str]]:
+    query_tokens = _tokenize(query)
+    if not query_tokens:
+        return 0, []
+
+    search_text = build_search_text(file_entry).lower()
+    matched_tokens = [token for token in query_tokens if token in search_text]
+    score = len(matched_tokens)
+
+    column_names = [c.get("name", "") for c in (file_entry.get("columns_info") or []) if isinstance(c, dict)]
+    column_text = " ".join(column_names).lower()
+    score += sum(2 for token in query_tokens if token in column_text)
+
+    blob_path = (file_entry.get("blob_path") or "").lower()
+    score += sum(1 for token in query_tokens if token in blob_path)
+
+    return score, sorted(set(matched_tokens))
 
 
 def build_catalog_tools(
@@ -26,18 +60,18 @@ def build_catalog_tools(
     def search_catalog(query: str) -> str:
         """Search the ingested file catalog to find files relevant to the user's question.
         Returns file paths, descriptions, columns, and what they are good for.
-        Use when you need to discover which file to query or what columns are available."""
+        Use when you need to discover which file to query or what columns are available.
+        This searches file metadata only; it does not search actual row values inside the data."""
         if not catalog:
             return json.dumps({"error": "No files have been ingested yet."})
 
         results = []
-        q_lower = query.lower()
         for f in catalog:
-            desc = (f.get("ai_description") or "").lower()
-            cols = " ".join(c["name"].lower() for c in (f.get("columns_info") or []))
-            good_for = " ".join((f.get("good_for") or [])).lower()
-            if any(word in desc + cols + good_for for word in q_lower.split()):
+            score, matched_terms = _match_score(query, f)
+            if score > 0:
                 results.append({
+                    "match_score": score,
+                    "matched_terms": matched_terms,
                     "blob_path": f["blob_path"],
                     "sql_path": _sql_path(f["blob_path"]),
                     "description": f.get("ai_description", ""),
@@ -47,6 +81,8 @@ def build_catalog_tools(
                     "good_for": f.get("good_for") or [],
                     "date_range": f"{f.get('date_range_start')} → {f.get('date_range_end')}",
                 })
+
+        results.sort(key=lambda item: (-item.get("match_score", 0), item["blob_path"]))
 
         if not results:
             results = [
@@ -67,7 +103,7 @@ def build_catalog_tools(
             result_descriptions=[r.get("description", "")[:120] for r in results],
         )
 
-        return json.dumps({"files": results, "total": len(results)}, default=str)
+        return json.dumps({"files": results[:15], "total": len(results)}, default=str)
 
     @tool
     def get_file_schema(blob_path: str) -> str:

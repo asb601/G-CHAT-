@@ -10,6 +10,7 @@ This module orchestrates the pipeline:
 """
 from __future__ import annotations
 
+import re
 import threading
 import time
 import uuid
@@ -35,12 +36,24 @@ from app.agent.tools.sample import build_sample_tool
 from app.agent.tools.sql import build_sql_tools
 from app.agent.tools.stats import build_stats_tool
 from app.core.logger import chat_logger, pipeline_logger
+from app.retrieval.embeddings import build_search_text
 
 # Per-request mutable stores (keyed by request_id)
 _request_stores: dict[str, dict] = {}
 _stores_lock = threading.Lock()
 
 _NO_FILES_MSG = "No files have been ingested yet. Please upload and ingest some files first."
+_RETRIEVAL_STOPWORDS = {
+    "a", "an", "and", "are", "bucket", "by", "for", "from", "given", "how", "in",
+    "invoice", "is", "it", "of", "on", "or", "show", "the", "to", "what", "with",
+}
+
+
+def _tokenize_query(text: str) -> list[str]:
+    return [
+        token for token in re.split(r"[^a-z0-9_]+", text.lower())
+        if len(token) >= 2 and token not in _RETRIEVAL_STOPWORDS
+    ]
 
 
 # ── Shared context builder ────────────────────────────────────────────────────
@@ -85,7 +98,7 @@ async def _build_agent_context(
     container_name = cached["container_name"]
     parquet_blob_path = cached["parquet_blob_path"]
     all_parquet_paths = cached["parquet_paths_all"]
-    sample_rows = cached["sample_rows"]
+    sample_rows_by_blob = cached["sample_rows_by_blob"]
 
     # ── STEP 2.5: RETRIEVAL — filter catalog to top-K relevant files ─────────
     # Run the 9-stage retrieval pipeline (temporal → BM25 → fuzzy → vector →
@@ -118,15 +131,22 @@ async def _build_agent_context(
     else:
         # Fallback: retrieval returned 0 — do in-memory keyword match on catalog
         # so we still show at most top_k=8 files, not all 27.
-        q_words = [w for w in query.lower().split() if len(w) > 2]
+        q_words = _tokenize_query(query)
 
         def _score(e: dict) -> int:
-            text = " ".join([
-                e.get("blob_path", ""),
-                e.get("ai_description", "") or "",
-                " ".join(e.get("good_for", []) or []),
-            ]).lower()
-            return sum(1 for w in q_words if w in text)
+            search_text = build_search_text(e).lower()
+            score = sum(1 for w in q_words if w in search_text)
+
+            column_text = " ".join(
+                c.get("name", "")
+                for c in (e.get("columns_info") or [])
+                if isinstance(c, dict)
+            ).lower()
+            score += sum(2 for w in q_words if w in column_text)
+
+            blob_path = (e.get("blob_path") or "").lower()
+            score += sum(1 for w in q_words if w in blob_path)
+            return score
 
         scored = sorted(full_catalog, key=_score, reverse=True)
         catalog = scored[:8]
@@ -154,7 +174,7 @@ async def _build_agent_context(
     # search_catalog tool uses the full catalog so it can find any file
     all_tools.extend(build_catalog_tools(full_catalog, all_parquet_paths, container_name))
     all_tools.extend(build_stats_tool(store))
-    all_tools.extend(build_sample_tool(sample_rows))
+    all_tools.extend(build_sample_tool(sample_rows_by_blob))
 
     # Build graph
     graph = build_graph(all_tools)
@@ -165,7 +185,7 @@ async def _build_agent_context(
         parquet_paths_all=parquet_paths_all,
         parquet_blob_path=parquet_blob_path,
         container_name=container_name,
-        sample_rows=sample_rows,
+        sample_rows_by_blob=sample_rows_by_blob,
         conversation_context=conversation_context,
     )
 
