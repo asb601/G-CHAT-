@@ -20,6 +20,9 @@ jobs:
 
             cd ~/G-CHAT-
 
+            # Discard any locally modified lock file so git pull never aborts
+            git checkout server/uv.lock 2>/dev/null || true
+
             # Pull latest code
             git pull origin main
 
