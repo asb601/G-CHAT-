@@ -60,7 +60,9 @@ async def sample_file(
                     '{azure_path}',
                     sample_size=500,
                     null_padding=true,
-                    ignore_errors=true
+                    ignore_errors=true,
+                    nullstr=['', 'NULL', 'null', 'N/A', 'n/a', 'NA', 'na',
+                             'None', 'none', 'NaN', 'nan', '-', 'TBD', 'tbd']
                 ) LIMIT 500
                 """
             ).df()

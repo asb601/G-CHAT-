@@ -100,6 +100,24 @@ def build_sql_tools(
                 duration_ms=duration_ms,
                 error=str(exc),  # full error, no truncation
             )
-            return json.dumps({"error": str(exc)[:500]})
+            error_msg = str(exc)[:500]
+            # Parquet Int64 dtype errors mean the file has empty strings in nullable
+            # integer columns — a Parquet conversion issue, not a SQL logic error.
+            # Give the LLM an explicit recovery hint so it tries specific columns
+            # instead of retrying SELECT *.
+            if any(tok in error_msg for tok in ("dtype", "Int64", "Invalid value ''")):
+                return json.dumps({
+                    "error": error_msg,
+                    "hint": (
+                        "This file has a Parquet data type issue: some nullable integer "
+                        "columns (typed Int64 in the schema) contain empty strings that "
+                        "cannot be read. Do NOT retry SELECT *. Instead, call "
+                        "get_file_schema to identify which columns are typed Int64, "
+                        "then SELECT only the non-Int64 columns you need. "
+                        "The file's string, float64, datetime, and lowercase int64 "
+                        "columns will work fine."
+                    ),
+                })
+            return json.dumps({"error": error_msg})
 
     return [run_sql]

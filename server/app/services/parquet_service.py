@@ -96,7 +96,9 @@ def _run_conversion(
                     SELECT * FROM read_csv_auto(
                         '{safe_csv}',
                         null_padding=true,
-                        ignore_errors=true
+                        ignore_errors=true,
+                        nullstr=['', 'NULL', 'null', 'N/A', 'n/a', 'NA', 'na',
+                                 'None', 'none', 'NaN', 'nan', '-', 'TBD', 'tbd']
                     )
                 )
                 TO '{safe_parquet}'

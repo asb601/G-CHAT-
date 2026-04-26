@@ -139,9 +139,7 @@ def _had_sql_error(messages: list) -> bool:
     """True if any prior run_sql ToolMessage returned a SQL error payload.
 
     Catches type-conversion / cast failures (string vs int join keys),
-    syntax errors, missing-column errors, etc. We treat these the same as
-    a 0-row result for nudge purposes — the agent should discover an
-    alternate file rather than report the raw error and surrender.
+    syntax errors, missing-column errors, etc.
     """
     for m in messages:
         if isinstance(m, ToolMessage) and getattr(m, "name", "") == "run_sql":
@@ -149,6 +147,37 @@ def _had_sql_error(messages: list) -> bool:
             if '"error"' in content:
                 return True
     return False
+
+
+_PARQUET_DTYPE_MARKERS = ("dtype", "Int64", "Invalid value ''")
+
+
+def _all_errors_are_parquet_dtype(messages: list) -> bool:
+    """True if EVERY SQL error in the history is a Parquet dtype/Int64 error.
+
+    Parquet dtype errors (Invalid value '' for dtype 'Int64') are file-level
+    data corruption — search_catalog will just find the same broken file again,
+    so the nudge is useless and wasteful.
+
+    JOIN cast errors (Conversion Error: Could not convert string 'CUST001' to
+    INT64) are wrong-file-selection problems — the nudge should still fire so
+    the agent can discover a compatible master file.
+
+    Returns False if any error is NOT a dtype error (i.e. keep the nudge).
+    Returns True only if every error is a dtype error (suppress nudge).
+    """
+    found_any_error = False
+    for m in messages:
+        if not (isinstance(m, ToolMessage) and getattr(m, "name", "") == "run_sql"):
+            continue
+        content = m.content if isinstance(m.content, str) else str(m.content)
+        if '"error"' not in content:
+            continue
+        found_any_error = True
+        if not any(marker in content for marker in _PARQUET_DTYPE_MARKERS):
+            # At least one error is NOT a dtype error — keep the nudge
+            return False
+    return found_any_error
 
 
 _RELATIVE_TIME_MARKERS = (
@@ -259,6 +288,12 @@ def _should_force_broaden(state: AgentState) -> bool:
         return False
     # Suppress nudge for legitimate empty-time-window results
     if had_zero and not had_err and _zero_rows_only_from_relative_time(msgs):
+        return False
+    # Do not nudge if ALL SQL errors were Parquet dtype/Int64 errors.
+    # Those are file data problems — search_catalog finds the same broken file.
+    # But JOIN cast errors (Conversion Error: Could not convert string) are NOT
+    # dtype errors and should still trigger the nudge.
+    if had_err and not had_zero and _all_errors_are_parquet_dtype(msgs):
         return False
     return True
 
