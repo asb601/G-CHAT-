@@ -176,6 +176,7 @@ async def _build_agent_context(
         container_name=container_name,
         sample_rows_by_blob=sample_rows_by_blob,
         conversation_context=conversation_context,
+        total_file_count=len(full_catalog),
     )
 
     # ── Log the complete system prompt so we can audit exactly what the LLM sees ──
@@ -197,6 +198,7 @@ async def _build_agent_context(
         "parquet_blob_path": parquet_blob_path,
         "tool_call_count": 0,
         "request_id": req_id,
+        "broaden_nudges": 0,
     }
 
     return {
@@ -354,6 +356,11 @@ async def run_agent_query_stream(
     tool_calls_made = 0
     files_used: set[str] = set()
     tool_outputs: list[str] = []
+    # Buffer chunks for the CURRENT LLM call. We only flush them to the user
+    # at on_chat_model_end *if* the response has no tool_calls (i.e. it is the
+    # final user-facing answer). Intermediate planning / "let me check the
+    # schema next" narration is discarded so the user never sees it.
+    pending_chunks: list[str] = []
 
     try:
         async for event in graph.astream_events(initial_state, version="v2"):
@@ -367,10 +374,14 @@ async def run_agent_query_stream(
                         continue
                     content = chunk.content if hasattr(chunk, "content") else ""
                     if content and isinstance(content, str):
-                        answer_tokens.append(content)
-                        yield {"type": "token", "content": content}
+                        # Buffer only — do NOT yield yet. We don't know whether
+                        # this LLM call is the final answer or an intermediate
+                        # reasoning turn until on_chat_model_end fires.
+                        pending_chunks.append(content)
 
             elif kind == "on_chat_model_start":
+                # New LLM call starting — reset the buffer.
+                pending_chunks = []
                 # Log the full message list going into the LLM for this iteration
                 raw_msgs = event["data"].get("input", {}).get("messages", [])
                 # langgraph batches messages as [[msg1, msg2, ...]]
@@ -395,6 +406,7 @@ async def run_agent_query_stream(
             elif kind == "on_chat_model_end":
                 # Log the complete LLM response for this iteration
                 resp = event["data"].get("output")
+                resp_tool_calls = getattr(resp, "tool_calls", None) if resp else None
                 if resp:
                     usage = getattr(resp, "usage_metadata", None)
                     pipeline_logger.debug(
@@ -403,11 +415,21 @@ async def run_agent_query_stream(
                         content=str(resp.content) if resp.content else "",
                         tool_calls=[
                             {"name": tc.get("name"), "args": tc.get("args")}
-                            for tc in (getattr(resp, "tool_calls", None) or [])
+                            for tc in (resp_tool_calls or [])
                         ],
                         prompt_tokens=usage.get("input_tokens", 0) if usage else 0,
                         completion_tokens=usage.get("output_tokens", 0) if usage else 0,
                     )
+
+                # Flush buffered chunks ONLY if this LLM turn produced no tool
+                # calls — i.e. it is the final answer the user should see.
+                # Intermediate planning / "now I'll check the schema" narration
+                # is dropped on the floor so the user only sees the result.
+                if pending_chunks and not resp_tool_calls:
+                    for piece in pending_chunks:
+                        answer_tokens.append(piece)
+                        yield {"type": "token", "content": piece}
+                pending_chunks = []
 
             elif kind == "on_tool_start":
                 tool_name = event.get("name", "")

@@ -15,6 +15,7 @@ class AgentState(TypedDict):
     parquet_blob_path: str | None  # prefer Parquet reads when available
     tool_call_count: int
     request_id: str
+    broaden_nudges: int  # how many times we've forced a "search wider" retry
 
 
 MAX_TOOL_CALLS = 8

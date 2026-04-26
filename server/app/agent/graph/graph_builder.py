@@ -7,7 +7,7 @@ import asyncio
 import time
 from typing import Any, Literal
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 from openai import RateLimitError
@@ -125,11 +125,114 @@ def build_agent_node(all_tools: list):
     return agent_node
 
 
-def route(state: AgentState) -> Literal["tools", "__end__"]:
-    """Route to tools if the last message has tool calls, else end."""
+def _had_zero_row_sql(messages: list) -> bool:
+    """True if any prior run_sql ToolMessage returned an empty result set."""
+    for m in messages:
+        if isinstance(m, ToolMessage) and getattr(m, "name", "") == "run_sql":
+            content = m.content if isinstance(m.content, str) else str(m.content)
+            if '"row_count": 0' in content or '"total_rows": 0' in content:
+                return True
+    return False
+
+
+def _called_search_catalog(messages: list) -> bool:
+    """True if search_catalog has been invoked at any point this session."""
+    return any(
+        isinstance(m, ToolMessage) and getattr(m, "name", "") == "search_catalog"
+        for m in messages
+    )
+
+
+def _had_any_nonzero_sql(messages: list) -> bool:
+    """True if at least one run_sql ToolMessage returned > 0 rows."""
+    import json as _json
+    for m in messages:
+        if isinstance(m, ToolMessage) and getattr(m, "name", "") == "run_sql":
+            content = m.content if isinstance(m.content, str) else str(m.content)
+            try:
+                data = _json.loads(content)
+                if isinstance(data, dict) and data.get("row_count", 0) > 0:
+                    return True
+            except Exception:
+                # If parsing fails, fall back to a permissive substring check
+                if '"row_count": 0' not in content and '"total_rows": 0' not in content:
+                    return True
+    return False
+
+
+def _should_force_broaden(state: AgentState) -> bool:
+    """Decide whether to force one more iteration to broaden the search.
+
+    Triggers when ALL of these hold:
+      * the last message is a final AIMessage with no further tool calls
+      * at least one run_sql happened and ALL run_sql calls returned 0 rows
+        (so we tried the shortlist files and got nothing)
+      * search_catalog has NOT been called yet (discovery never broadened)
+      * we have not already forced this nudge in this session
+      * we still have tool budget remaining
+
+    The phrasing of the model's final answer is NOT inspected — the model can
+    surrender silently or with any wording. The structural signal (zero-row
+    SQL + no catalog discovery) is sufficient.
+    """
+    if state.get("broaden_nudges", 0) >= 1:
+        return False
+    if state.get("tool_call_count", 0) >= MAX_TOOL_CALLS:
+        return False
+    msgs = state["messages"]
+    if not msgs:
+        return False
+    last = msgs[-1]
+    if not isinstance(last, AIMessage):
+        return False
+    if getattr(last, "tool_calls", None):
+        return False
+    if not _had_zero_row_sql(msgs):
+        return False
+    if _had_any_nonzero_sql(msgs):
+        # The model already got real rows from somewhere — don't second-guess.
+        return False
+    if _called_search_catalog(msgs):
+        return False
+    return True
+
+
+_BROADEN_NUDGE = (
+    "Stop. You produced a final answer admitting the requested value could not be "
+    "found, but you have not yet broadened your search. The initial file shortlist "
+    "is only a starting point — the catalog contains additional files that may hold "
+    "this value (alternate name tables, party masters, account masters, alias / "
+    "search-term columns, etc.). Before concluding the value is absent you MUST:\n"
+    "  1. Call search_catalog with semantic terms describing the type of file that "
+    "would naturally store this value (for example: 'party name', 'customer "
+    "account', 'account master', 'name lookup', 'parties', 'site name').\n"
+    "  2. Inspect the schema of the most promising new candidate with get_file_schema.\n"
+    "  3. Run a lookup query (exact, then case-insensitive partial) against that file.\n"
+    "Only after those three steps return nothing may you tell the user the value "
+    "could not be located."
+)
+
+
+def broaden_nudge_node(state: AgentState) -> dict:
+    """Inject a corrective system message and bump the nudge counter."""
+    pipeline_logger.info(
+        "broaden_nudge_injected",
+        reason="agent gave up without calling search_catalog after a 0-row SQL",
+        tool_call_count=state.get("tool_call_count", 0),
+    )
+    return {
+        "messages": [SystemMessage(content=_BROADEN_NUDGE)],
+        "broaden_nudges": state.get("broaden_nudges", 0) + 1,
+    }
+
+
+def route(state: AgentState) -> Literal["tools", "broaden_nudge", "__end__"]:
+    """Route to tools if the LLM wants more tools; else either nudge or end."""
     last = state["messages"][-1]
     if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
         return "tools"
+    if _should_force_broaden(state):
+        return "broaden_nudge"
     return END
 
 
@@ -141,8 +244,10 @@ def build_graph(all_tools: list) -> Any:
     builder = StateGraph(AgentState)
     builder.add_node("agent", agent_node)
     builder.add_node("tools", tool_node)
+    builder.add_node("broaden_nudge", broaden_nudge_node)
     builder.add_edge(START, "agent")
     builder.add_conditional_edges("agent", route)
     builder.add_edge("tools", "agent")
+    builder.add_edge("broaden_nudge", "agent")
 
     return builder.compile()
