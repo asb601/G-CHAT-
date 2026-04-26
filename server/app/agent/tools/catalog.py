@@ -13,6 +13,7 @@ def _match_score(query: str, file_entry: dict) -> tuple[int, list[str]]:
     query_tokens = tokenize_search_query(query)
     if not query_tokens:
         return 0, []
+    
 
     search_text = build_search_text(file_entry).lower()
     matched_tokens = [token for token in query_tokens if token in search_text]
