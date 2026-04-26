@@ -10,7 +10,6 @@ This module orchestrates the pipeline:
 """
 from __future__ import annotations
 
-import re
 import threading
 import time
 import uuid
@@ -22,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.catalog_cache import invalidate_catalog_cache, load_catalog  # re-export
 from app.agent.graph.graph_builder import build_graph
 from app.agent.prompts.prompt_builder import build_system_prompt
+from app.agent.search_normalization import tokenize_search_query
 from app.retrieval.orchestrator import retrieve_with_scores
 from app.agent.response_helpers import (
     extract_answer,
@@ -43,17 +43,6 @@ _request_stores: dict[str, dict] = {}
 _stores_lock = threading.Lock()
 
 _NO_FILES_MSG = "No files have been ingested yet. Please upload and ingest some files first."
-_RETRIEVAL_STOPWORDS = {
-    "a", "an", "and", "are", "bucket", "by", "for", "from", "given", "how", "in",
-    "invoice", "is", "it", "of", "on", "or", "show", "the", "to", "what", "with",
-}
-
-
-def _tokenize_query(text: str) -> list[str]:
-    return [
-        token for token in re.split(r"[^a-z0-9_]+", text.lower())
-        if len(token) >= 2 and token not in _RETRIEVAL_STOPWORDS
-    ]
 
 
 # ── Shared context builder ────────────────────────────────────────────────────
@@ -131,7 +120,7 @@ async def _build_agent_context(
     else:
         # Fallback: retrieval returned 0 — do in-memory keyword match on catalog
         # so we still show at most top_k=8 files, not all 27.
-        q_words = _tokenize_query(query)
+        q_words = tokenize_search_query(query)
 
         def _score(e: dict) -> int:
             search_text = build_search_text(e).lower()

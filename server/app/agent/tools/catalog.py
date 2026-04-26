@@ -2,28 +2,15 @@
 from __future__ import annotations
 
 import json
-import re
 from langchain_core.tools import tool
 
+from app.agent.search_normalization import tokenize_search_query
 from app.core.logger import pipeline_logger
 from app.retrieval.embeddings import build_search_text
 
 
-_SEARCH_STOPWORDS = {
-    "a", "an", "and", "are", "by", "for", "from", "given", "how", "in", "into",
-    "is", "it", "last", "of", "on", "or", "show", "the", "to", "what", "with",
-}
-
-
-def _tokenize(text: str) -> list[str]:
-    return [
-        token for token in re.split(r"[^a-z0-9_]+", text.lower())
-        if len(token) >= 2 and token not in _SEARCH_STOPWORDS
-    ]
-
-
 def _match_score(query: str, file_entry: dict) -> tuple[int, list[str]]:
-    query_tokens = _tokenize(query)
+    query_tokens = tokenize_search_query(query)
     if not query_tokens:
         return 0, []
 
