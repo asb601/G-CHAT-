@@ -94,6 +94,19 @@ async def ingest_file(file_id: str, db: AsyncSession) -> None:
         is_excel = ext in {".xlsx", ".xls", ".xlsm", ".xlsb"}
         already_preprocessed = bool(file.is_preprocessed)
 
+        # ── Auto-detect: blob_path already points to a clean CSV ─────────────
+        # Happens when is_preprocessed was never backfilled for files that were
+        # preprocessed before the column was added (column defaults to FALSE).
+        # Detecting by path prefix is reliable — raw blobs never live under
+        # preprocessed/; only clean CSVs written by preprocess_file() do.
+        if not already_preprocessed and file.blob_path and file.blob_path.startswith("preprocessed/"):
+            already_preprocessed = True
+            file.is_preprocessed = True
+            await db.commit()
+            ingest_logger.info("step", step="0/6", name="preprocess",
+                               status="skipped", reason="auto_detected_clean_path",
+                               blob_path=file.blob_path)
+
         # ── Pre-flight cleanup for full pipeline (not already preprocessed) ───
         # If a previous partial or full ingest left stale clean CSV / Parquet
         # blobs in Azure, delete them now before we overwrite.  This prevents

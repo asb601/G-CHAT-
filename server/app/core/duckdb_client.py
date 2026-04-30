@@ -30,7 +30,16 @@ def _get_connection(connection_string: str) -> duckdb.DuckDBPyConnection:
         cache = _thread_local.connections
     if key not in cache:
         conn = duckdb.connect()
-        conn.execute("INSTALL azure IF NOT EXISTS;")
+        # INSTALL azure IF NOT EXISTS requires DuckDB ≥ 0.10; fall back to bare
+        # INSTALL (re-installs if not cached, but never raises a syntax error)
+        # and then suppress the "already installed" error for bare INSTALL.
+        try:
+            conn.execute("INSTALL azure IF NOT EXISTS;")
+        except Exception:
+            try:
+                conn.execute("INSTALL azure;")
+            except Exception:
+                pass  # already installed — safe to ignore
         conn.execute("LOAD azure;")
         conn.execute("SET azure_transport_option_type = 'curl';")
         safe_conn = connection_string.replace("'", "''")
