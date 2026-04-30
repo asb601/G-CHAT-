@@ -6,8 +6,16 @@ POST /api/admin/reingest-all
 GET  /api/admin/domains
 PATCH /api/admin/users/{user_id}/domains
 PATCH /api/admin/folders/{folder_id}/domain
+GET  /api/admin/files/eligible
+GET  /api/admin/departments/{domain_name}/files
+POST /api/admin/departments/{domain_name}/ai-assign
+POST /api/admin/departments/{domain_name}/assign
+DELETE /api/admin/departments/{domain_name}/files/{file_id}
+GET  /api/admin/missing-parquet
+POST /api/admin/retry-parquet
 """
 import asyncio
+import re
 import uuid
 
 import structlog
@@ -86,10 +94,11 @@ async def reingest_all(
     all_files = list(result.scalars().all())
     ingestable = [
         f for f in all_files
-        if (f.name or "").rsplit(".", 1)[-1].lower() in ("csv", "txt", "tsv")
+        if (f.name or "").rsplit(".", 1)[-1].lower()
+        in ("csv", "txt", "tsv", "tab", "xlsx", "xls", "xlsm")
     ]
     if not ingestable:
-        raise HTTPException(status_code=400, detail="No CSV/TXT/TSV files found.")
+        raise HTTPException(status_code=400, detail="No ingestable files found.")
 
     file_ids = [f.id for f in ingestable]
 
@@ -218,3 +227,297 @@ async def set_folder_domain(
     )
     await db.commit()
     return {"folder_id": folder_id, "domain_tag": body.domain_tag or None}
+
+
+# ── Department ↔ File assignment ─────────────────────────────────────────────
+
+class _BulkAssignBody(BaseModel):
+    file_ids: list[str]
+
+
+def _score_file_for_domain(good_for: list, ai_description: str | None,
+                            key_metrics: list, key_dimensions: list,
+                            file_name: str, domain_name: str) -> float:
+    """
+    Keyword-score a file's metadata against a domain name.
+    Returns a float ≥ 0. Files with score ≥ 1.0 are considered a match.
+    """
+    domain_words = set(re.split(r"[\s\-_/,]+", domain_name.lower())) - {
+        "", "and", "the", "of", "for", "a", "an", "in", "to"
+    }
+    if not domain_words:
+        return 0.0
+
+    score = 0.0
+    desc_lower = (ai_description or "").lower()
+    name_lower = file_name.lower()
+
+    for word in domain_words:
+        # good_for describes use cases → highest weight
+        for item in (good_for or []):
+            if word in str(item).lower():
+                score += 2.0
+
+        # ai_description
+        if word in desc_lower:
+            score += 1.0
+
+        # key_metrics
+        for m in (key_metrics or []):
+            if word in str(m).lower():
+                score += 1.5
+
+        # key_dimensions
+        for d in (key_dimensions or []):
+            if word in str(d).lower():
+                score += 1.0
+
+        # file name itself
+        if word in name_lower:
+            score += 0.5
+
+    return score
+
+
+@router.get("/files/eligible")
+async def list_eligible_files(
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """
+    Return all files with their AI metadata — used by the manual file picker
+    and the AI-sort preview in the Profile → Domains tab.
+    """
+    rows = (await db.execute(
+        select(File, FileMetadata, Folder)
+        .join(FileMetadata, FileMetadata.file_id == File.id, isouter=True)
+        .join(Folder, Folder.id == File.folder_id, isouter=True)
+        .order_by(File.name)
+    )).all()
+
+    files = []
+    for file, meta, folder in rows:
+        files.append({
+            "file_id": file.id,
+            "name": file.name,
+            "folder_id": file.folder_id,
+            "current_domain": folder.domain_tag if folder else None,
+            "ai_description": meta.ai_description if meta else None,
+            "good_for": meta.good_for if meta else [],
+            "key_metrics": meta.key_metrics if meta else [],
+            "key_dimensions": meta.key_dimensions if meta else [],
+            "ingest_status": file.ingest_status,
+        })
+
+    return {"files": files, "count": len(files)}
+
+
+@router.get("/departments/{domain_name}/files")
+async def list_department_files(
+    domain_name: str,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Return files currently assigned to a department's folder."""
+    domain_folder = (await db.execute(
+        select(Folder).where(Folder.domain_tag == domain_name).limit(1)
+    )).scalar_one_or_none()
+    if not domain_folder:
+        raise HTTPException(status_code=404, detail=f"Department '{domain_name}' not found")
+
+    files = (await db.execute(
+        select(File).where(File.folder_id == domain_folder.id).order_by(File.name)
+    )).scalars().all()
+
+    return {
+        "domain": domain_name,
+        "folder_id": domain_folder.id,
+        "files": [
+            {"file_id": f.id, "name": f.name, "ingest_status": f.ingest_status}
+            for f in files
+        ],
+        "count": len(files),
+    }
+
+
+@router.post("/departments/{domain_name}/ai-assign")
+async def ai_assign_files_to_department(
+    domain_name: str,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """
+    AI keyword-match: reads each file's good_for, ai_description, key_metrics
+    and assigns files where score ≥ 1.0 to this department's folder.
+    Only touches files that are not already in a domain-tagged folder.
+    """
+    domain_folder = (await db.execute(
+        select(Folder).where(Folder.domain_tag == domain_name).limit(1)
+    )).scalar_one_or_none()
+    if not domain_folder:
+        raise HTTPException(status_code=404, detail=f"Department '{domain_name}' not found")
+
+    rows = (await db.execute(
+        select(File, FileMetadata, Folder)
+        .join(FileMetadata, FileMetadata.file_id == File.id, isouter=True)
+        .join(Folder, Folder.id == File.folder_id, isouter=True)
+    )).all()
+
+    assigned_ids: list[str] = []
+    assigned_names: list[str] = []
+
+    for file, meta, existing_folder in rows:
+        # Skip files already pinned to a domain (respect existing assignments)
+        if existing_folder and existing_folder.domain_tag:
+            continue
+        # Skip files without metadata (not yet ingested)
+        if not meta:
+            continue
+
+        score = _score_file_for_domain(
+            good_for=meta.good_for or [],
+            ai_description=meta.ai_description,
+            key_metrics=meta.key_metrics or [],
+            key_dimensions=meta.key_dimensions or [],
+            file_name=file.name,
+            domain_name=domain_name,
+        )
+
+        if score >= 1.0:
+            assigned_ids.append(file.id)
+            assigned_names.append(file.name)
+
+    if assigned_ids:
+        await db.execute(
+            update(File)
+            .where(File.id.in_(assigned_ids))
+            .values(folder_id=domain_folder.id)
+        )
+        await db.commit()
+        invalidate_catalog_cache()
+
+    return {
+        "domain": domain_name,
+        "assigned_count": len(assigned_ids),
+        "assigned_files": assigned_names,
+    }
+
+
+@router.post("/departments/{domain_name}/assign")
+async def manually_assign_files_to_department(
+    domain_name: str,
+    body: _BulkAssignBody,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Manually assign a list of file IDs to a department's folder."""
+    if not body.file_ids:
+        raise HTTPException(status_code=400, detail="No file_ids provided")
+
+    domain_folder = (await db.execute(
+        select(Folder).where(Folder.domain_tag == domain_name).limit(1)
+    )).scalar_one_or_none()
+    if not domain_folder:
+        raise HTTPException(status_code=404, detail=f"Department '{domain_name}' not found")
+
+    await db.execute(
+        update(File)
+        .where(File.id.in_(body.file_ids))
+        .values(folder_id=domain_folder.id)
+    )
+    await db.commit()
+    invalidate_catalog_cache()
+
+    return {"domain": domain_name, "assigned_count": len(body.file_ids)}
+
+
+@router.delete("/departments/{domain_name}/files/{file_id}")
+async def remove_file_from_department(
+    domain_name: str,
+    file_id: str,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Remove a file from a department by unsetting its folder assignment."""
+    domain_folder = (await db.execute(
+        select(Folder).where(Folder.domain_tag == domain_name).limit(1)
+    )).scalar_one_or_none()
+    if not domain_folder:
+        raise HTTPException(status_code=404, detail=f"Department '{domain_name}' not found")
+
+    file = await db.get(File, file_id)
+    if not file:
+        raise HTTPException(status_code=404, detail="File not found")
+    if file.folder_id != domain_folder.id:
+        raise HTTPException(status_code=400, detail="File is not in this department")
+
+    await db.execute(
+        update(File).where(File.id == file_id).values(folder_id=None)
+    )
+    await db.commit()
+    invalidate_catalog_cache()
+
+    return {"file_id": file_id, "domain": domain_name, "unassigned": True}
+
+
+# ── Parquet status / retry ────────────────────────────────────────────────────
+
+@router.get("/missing-parquet")
+async def list_missing_parquet(
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """
+    Return all CSV/TSV files that have been ingested but whose Parquet
+    conversion record is missing or incomplete.
+    """
+    from app.models.file_analytics import FileAnalytics as _FA
+
+    rows = (await db.execute(
+        select(File, _FA)
+        .join(_FA, _FA.file_id == File.id, isouter=True)
+        .where(File.ingest_status == "ingested")
+    )).all()
+
+    missing = []
+    for file, analytics in rows:
+        ext = (file.name or "").rsplit(".", 1)[-1].lower()
+        if ext not in ("csv", "txt", "tsv"):
+            continue
+        # A file is "missing parquet" if analytics doesn't exist OR parquet path is empty
+        if analytics is None or not analytics.parquet_blob_path:
+            missing.append({
+                "file_id": file.id,
+                "name": file.name,
+                "blob_path": file.blob_path,
+                "has_analytics": analytics is not None,
+            })
+
+    return {"files": missing, "count": len(missing)}
+
+
+@router.post("/retry-parquet")
+async def retry_missing_parquet(
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """
+    Re-trigger Parquet conversion for all ingested CSV files that
+    haven't been converted yet.
+    """
+    result = await db.execute(
+        select(File).where(File.ingest_status == "ingested")
+    )
+    files = list(result.scalars().all())
+    ingestable = [
+        f for f in files
+        if (f.name or "").rsplit(".", 1)[-1].lower() in ("csv", "txt", "tsv")
+        and f.blob_path
+    ]
+
+    file_ids = [f.id for f in ingestable]
+
+    ingest_logger.info("retry_parquet_started", admin_id=admin.id, file_count=len(file_ids))
+    asyncio.create_task(_batch_reingest(file_ids))
+
+    return {"message": "Parquet retry started", "count": len(file_ids)}

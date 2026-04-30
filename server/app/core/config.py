@@ -32,6 +32,12 @@ class Settings(BaseSettings):
     AZURE_OPENAI_MODEL: str = ""
     AZURE_OPENAI_API_VERSION: str = "2024-02-01"
 
+    # SMTP (Gmail App Password recommended)
+    SMTP_HOST: str = "smtp.gmail.com"
+    SMTP_PORT: int = 587
+    SMTP_USER: str = ""
+    SMTP_PASSWORD: str = ""
+
     # CORS
     FRONTEND_URL: str = "http://localhost:3000"
 

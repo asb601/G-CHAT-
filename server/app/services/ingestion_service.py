@@ -2,6 +2,7 @@ import asyncio
 import time
 import uuid
 from datetime import date
+from pathlib import Path
 
 import structlog
 from sqlalchemy import select
@@ -16,6 +17,7 @@ from app.models.container import ContainerConfig
 from app.models.file import File
 from app.models.file_metadata import FileMetadata
 from app.services.analytics_service import compute_and_store_analytics, trigger_parquet_conversion
+from app.services.data_preprocessor import ALL_EXTS as _PREPROCESS_EXTS, preprocess_file
 
 
 def _ms(start: float) -> float:
@@ -57,6 +59,48 @@ async def ingest_file(file_id: str, db: AsyncSession) -> None:
 
         file.ingest_status = "pending"
         await db.commit()
+
+        # ── Step 0/6 · Preprocess (clean raw file → upload clean CSV) ─────────
+        ext = Path(file.name).suffix.lower()
+        if ext in _PREPROCESS_EXTS:
+            step_start = time.perf_counter()
+            ingest_logger.info("step", step="0/6", name="preprocess", status="started",
+                               blob_path=file.blob_path, ext=ext)
+            try:
+                prep = await preprocess_file(
+                    blob_path=file.blob_path,
+                    file_name=file.name,
+                    file_id=file_id,
+                    connection_string=container.connection_string,
+                    container_name=container.container_name,
+                )
+                # Point all downstream steps at the clean CSV
+                file.blob_path = prep.clean_blob_path
+                await db.commit()
+                ingest_logger.info(
+                    "step", step="0/6", name="preprocess", status="done",
+                    clean_blob_path=prep.clean_blob_path,
+                    original_rows=prep.original_rows,
+                    clean_rows=prep.clean_rows,
+                    rows_dropped=prep.rows_dropped,
+                    cols_renamed=len(prep.cols_renamed),
+                    warnings=prep.warnings[:5],
+                    duration_ms=_ms(step_start),
+                )
+            except Exception as prep_exc:
+                # Non-fatal for CSV/text files — fall back to original blob_path
+                # Fatal for Excel — DuckDB cannot read .xlsx
+                is_excel = ext in {".xlsx", ".xls", ".xlsm", ".xlsb"}
+                ingest_logger.warning(
+                    "step", step="0/6", name="preprocess",
+                    status="failed" if is_excel else "skipped",
+                    error=str(prep_exc)[:400], ext=ext,
+                    duration_ms=_ms(step_start),
+                )
+                if is_excel:
+                    raise RuntimeError(
+                        f"Excel preprocessing failed — file cannot be ingested: {prep_exc}"
+                    ) from prep_exc
 
         # ── Step 1/6 · Sample with DuckDB ──
         step_start = time.perf_counter()

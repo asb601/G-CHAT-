@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useEffect } from "react";
 import useSWR from "swr";
-import { UserCircle, Users, Shield, ShieldOff, Loader2, Database, RefreshCw, CheckCircle2, AlertTriangle, Tag, X, Plus } from "lucide-react";
+import { UserCircle, Users, Shield, ShieldOff, Loader2, Database, RefreshCw, CheckCircle2, AlertTriangle, Tag, X, Plus, Sparkles, FolderOpen, FileText, ChevronDown, ChevronRight, Trash2, Clock, UserCheck, UserX, Mail } from "lucide-react";
 import { useAuth } from "@/components/auth-provider";
 import { apiFetch } from "@/lib/auth";
 import { cn } from "@/lib/utils";
@@ -20,6 +20,44 @@ interface UserItem {
   allowed_domains: string[] | null;
 }
 
+interface EligibleFile {
+  file_id: string;
+  name: string;
+  folder_id: string | null;
+  current_domain: string | null;
+  ai_description: string | null;
+  good_for: string[];
+  ingest_status: string;
+}
+
+interface DeptFile {
+  file_id: string;
+  name: string;
+  ingest_status: string;
+}
+
+interface AccessRequestItem {
+  id: string;
+  user_id: string;
+  user_email: string;
+  user_name: string | null;
+  user_picture: string | null;
+  status: string;
+  message: string | null;
+  requested_at: string;
+}
+
+interface AccessRequestItem {
+  id: string;
+  user_id: string;
+  user_email: string;
+  user_name: string | null;
+  user_picture: string | null;
+  status: string;
+  message: string | null;
+  requested_at: string;
+}
+
 /* ── fetchers ────────────────────────────────────────────────────────────── */
 
 const usersFetcher = async (): Promise<UserItem[]> => {
@@ -33,6 +71,12 @@ const domainsFetcher = async (): Promise<string[]> => {
   if (!res.ok) return [];
   const data = await res.json();
   return data.domains ?? [];
+};
+
+const accessRequestsFetcher = async (): Promise<AccessRequestItem[]> => {
+  const res = await apiFetch("/api/access-requests");
+  if (!res.ok) return [];
+  return res.json();
 };
 
 /* ── tabs ────────────────────────────────────────────────────────────────── */
@@ -283,7 +327,13 @@ function UsersTab({ currentUserId }: { currentUserId: string }) {
   const { data: users, mutate } = useSWR("users-list", usersFetcher, {
     revalidateOnFocus: false,
   });
+  const { data: pendingRequests, mutate: mutateRequests } = useSWR(
+    "access-requests",
+    accessRequestsFetcher,
+    { revalidateOnFocus: true, refreshInterval: 30000 },
+  );
   const [togglingId, setTogglingId] = useState<string | null>(null);
+  const [reviewingId, setReviewingId] = useState<string | null>(null);
 
   const handleToggleAdmin = useCallback(
     async (userId: string) => {
@@ -302,6 +352,24 @@ function UsersTab({ currentUserId }: { currentUserId: string }) {
     [mutate]
   );
 
+  const handleReview = useCallback(
+    async (requestId: string, action: "approve" | "decline") => {
+      setReviewingId(requestId);
+      try {
+        const res = await apiFetch(`/api/access-requests/${requestId}/${action}`, {
+          method: "PATCH",
+        });
+        if (res.ok) {
+          mutateRequests();
+          mutate(); // refresh users list too
+        }
+      } finally {
+        setReviewingId(null);
+      }
+    },
+    [mutate, mutateRequests]
+  );
+
   if (!users) {
     return (
       <div className="flex items-center justify-center h-40">
@@ -311,7 +379,89 @@ function UsersTab({ currentUserId }: { currentUserId: string }) {
   }
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-6">
+
+      {/* ── Pending access requests ── */}
+      {pendingRequests && pendingRequests.length > 0 && (
+        <div className="space-y-3">
+          <div className="flex items-center gap-2">
+            <Clock className="w-4 h-4 text-yellow-500" />
+            <h3 className="text-sm font-semibold text-foreground">
+              Pending Access Requests
+              <span className="ml-2 px-1.5 py-0.5 text-[10px] font-medium rounded-full bg-yellow-500/15 text-yellow-600">
+                {pendingRequests.length}
+              </span>
+            </h3>
+          </div>
+
+          {pendingRequests.map((req) => {
+            const reviewing = reviewingId === req.id;
+            return (
+              <div
+                key={req.id}
+                className="flex items-start justify-between gap-4 px-4 py-3 rounded-xl border border-yellow-500/20 bg-yellow-500/5"
+              >
+                <div className="flex items-start gap-3 min-w-0">
+                  {req.user_picture ? (
+                    <img
+                      src={req.user_picture}
+                      alt=""
+                      className="w-9 h-9 rounded-full border border-border mt-0.5 shrink-0"
+                      referrerPolicy="no-referrer"
+                    />
+                  ) : (
+                    <div className="w-9 h-9 rounded-full bg-surface-raised border border-border flex items-center justify-center shrink-0 mt-0.5">
+                      <UserCircle className="w-5 h-5 text-muted-foreground" />
+                    </div>
+                  )}
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-foreground truncate">
+                      {req.user_name || req.user_email}
+                    </p>
+                    <p className="text-xs text-muted-foreground truncate">{req.user_email}</p>
+                    {req.message && (
+                      <p className="text-xs text-muted-foreground mt-1 italic">
+                        &ldquo;{req.message}&rdquo;
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0 mt-0.5">
+                  <button
+                    onClick={() => handleReview(req.id, "approve")}
+                    disabled={reviewing}
+                    title="Approve"
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-green-500/10 text-green-600 hover:bg-green-500/20 transition-colors disabled:opacity-40"
+                  >
+                    {reviewing ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <UserCheck className="w-3.5 h-3.5" />
+                    )}
+                    Approve
+                  </button>
+                  <button
+                    onClick={() => handleReview(req.id, "decline")}
+                    disabled={reviewing}
+                    title="Decline"
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-destructive/10 text-destructive hover:bg-destructive/20 transition-colors disabled:opacity-40"
+                  >
+                    <UserX className="w-3.5 h-3.5" />
+                    Decline
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ── Existing users ── */}
+      <div className="space-y-3">
+        {pendingRequests && pendingRequests.length > 0 && (
+          <h3 className="text-sm font-semibold text-foreground">Members</h3>
+        )}
       {users.map((u) => {
         const isCurrent = u.id === currentUserId;
         const toggling = togglingId === u.id;
@@ -383,6 +533,7 @@ function UsersTab({ currentUserId }: { currentUserId: string }) {
           </div>
         );
       })}
+      </div>  {/* end members list */}
     </div>
   );
 }
@@ -689,6 +840,340 @@ function DomainsTab() {
           </div>
         )}
       </section>
+
+      {/* ── Department file assignment ── */}
+      <section className="space-y-3">
+        <h2 className="text-sm font-semibold text-foreground">File Assignment by Department</h2>
+        <p className="text-xs text-muted-foreground">
+          Select a department to see its files. Use AI Sort to auto-assign based on file content, or add files manually.
+        </p>
+
+        {domains.length === 0 ? (
+          <p className="text-sm text-muted-foreground py-4 text-center">
+            No departments yet. Create one above first.
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {domains.map((domain) => (
+              <DepartmentFilePanel key={domain} domain={domain} />
+            ))}
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+/* ── Department file panel ────────────────────────────────────────────────── */
+
+function DepartmentFilePanel({ domain }: { domain: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiResult, setAiResult] = useState<{ assigned_count: number; assigned_files: string[] } | null>(null);
+  const [showPicker, setShowPicker] = useState(false);
+
+  const { data, mutate, isLoading } = useSWR<{ files: DeptFile[]; count: number }>(
+    expanded ? `/api/admin/departments/${encodeURIComponent(domain)}/files` : null,
+    (url: string) => apiFetch(url).then((r) => r.json()),
+  );
+
+  const handleAiSort = async () => {
+    setAiLoading(true);
+    setAiResult(null);
+    try {
+      const res = await apiFetch(`/api/admin/departments/${encodeURIComponent(domain)}/ai-assign`, {
+        method: "POST",
+      });
+      const body = await res.json();
+      setAiResult(body);
+      mutate();
+    } catch {
+      setAiResult({ assigned_count: -1, assigned_files: [] });
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
+  const handleRemoveFile = async (fileId: string) => {
+    await apiFetch(`/api/admin/departments/${encodeURIComponent(domain)}/files/${fileId}`, {
+      method: "DELETE",
+    });
+    mutate();
+  };
+
+  return (
+    <div className="rounded-xl border border-border bg-surface overflow-hidden">
+      {/* Header row */}
+      <button
+        onClick={() => setExpanded((v) => !v)}
+        className="w-full flex items-center justify-between px-4 py-3 hover:bg-surface-raised transition-colors"
+      >
+        <div className="flex items-center gap-2">
+          <FolderOpen className="w-4 h-4 text-primary" />
+          <span className="text-sm font-medium text-foreground">{domain}</span>
+          {data && (
+            <span className="text-xs text-muted-foreground">({data.count} file{data.count !== 1 ? "s" : ""})</span>
+          )}
+        </div>
+        {expanded ? (
+          <ChevronDown className="w-4 h-4 text-muted-foreground" />
+        ) : (
+          <ChevronRight className="w-4 h-4 text-muted-foreground" />
+        )}
+      </button>
+
+      {expanded && (
+        <div className="px-4 pb-4 space-y-3 border-t border-border">
+          {/* Action buttons */}
+          <div className="flex gap-2 pt-3">
+            <button
+              onClick={handleAiSort}
+              disabled={aiLoading}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-primary text-primary-foreground rounded-lg disabled:opacity-50 hover:opacity-90 transition-opacity"
+            >
+              {aiLoading ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Sparkles className="w-3.5 h-3.5" />
+              )}
+              AI Sort
+            </button>
+            <button
+              onClick={() => setShowPicker(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs border border-border text-muted-foreground rounded-lg hover:text-foreground hover:border-muted-foreground transition-colors"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              Add Files
+            </button>
+          </div>
+
+          {/* AI result banner */}
+          {aiResult && (
+            <div className={cn(
+              "flex items-start gap-2 p-3 rounded-lg text-xs border",
+              aiResult.assigned_count === -1
+                ? "bg-destructive/10 border-destructive/20 text-destructive"
+                : "bg-primary/10 border-primary/20 text-primary"
+            )}>
+              {aiResult.assigned_count === -1 ? (
+                <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+              ) : (
+                <Sparkles className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+              )}
+              <div>
+                {aiResult.assigned_count === -1
+                  ? "AI sort failed — please try again."
+                  : aiResult.assigned_count === 0
+                  ? "No matching files found for this department."
+                  : (
+                    <>
+                      <span className="font-medium">AI assigned {aiResult.assigned_count} file{aiResult.assigned_count !== 1 ? "s" : ""}:</span>{" "}
+                      {aiResult.assigned_files.join(", ")}
+                    </>
+                  )}
+              </div>
+            </div>
+          )}
+
+          {/* File list */}
+          {isLoading ? (
+            <div className="flex justify-center py-4">
+              <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
+            </div>
+          ) : data && data.files.length === 0 ? (
+            <p className="text-xs text-muted-foreground py-2">No files assigned yet.</p>
+          ) : (
+            <div className="space-y-1.5">
+              {(data?.files ?? []).map((f) => (
+                <div
+                  key={f.file_id}
+                  className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-surface-raised"
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <FileText className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                    <span className="text-xs text-foreground truncate">{f.name}</span>
+                    {f.ingest_status !== "ingested" && (
+                      <span className="text-[10px] text-amber-500 shrink-0">{f.ingest_status}</span>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => handleRemoveFile(f.file_id)}
+                    className="p-1 text-muted-foreground hover:text-destructive transition-colors shrink-0"
+                    title="Remove from department"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {showPicker && (
+        <FilePickerModal
+          domain={domain}
+          onClose={() => setShowPicker(false)}
+          onAssigned={() => { mutate(); setShowPicker(false); }}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ── File picker modal ────────────────────────────────────────────────────── */
+
+function FilePickerModal({
+  domain,
+  onClose,
+  onAssigned,
+}: {
+  domain: string;
+  onClose: () => void;
+  onAssigned: () => void;
+}) {
+  const [files, setFiles] = useState<EligibleFile[]>([]);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [search, setSearch] = useState("");
+
+  useEffect(() => {
+    apiFetch("/api/admin/files/eligible")
+      .then((r) => r.json())
+      .then((d) => {
+        // Show only files not already in this domain, sorted by name
+        const eligible = (d.files as EligibleFile[]).filter(
+          (f) => f.current_domain !== domain
+        );
+        setFiles(eligible);
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [domain]);
+
+  const toggle = (fileId: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(fileId)) next.delete(fileId);
+      else next.add(fileId);
+      return next;
+    });
+
+  const handleSave = async () => {
+    if (selected.size === 0) return;
+    setSaving(true);
+    try {
+      await apiFetch(`/api/admin/departments/${encodeURIComponent(domain)}/assign`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ file_ids: Array.from(selected) }),
+      });
+      onAssigned();
+    } catch {
+      setSaving(false);
+    }
+  };
+
+  const filtered = files.filter((f) =>
+    f.name.toLowerCase().includes(search.toLowerCase()) ||
+    (f.ai_description ?? "").toLowerCase().includes(search.toLowerCase())
+  );
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+      <div className="w-full max-w-lg bg-surface border border-border rounded-2xl shadow-xl flex flex-col max-h-[80vh]">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+          <div>
+            <h2 className="text-sm font-semibold text-foreground">Add Files to "{domain}"</h2>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              {selected.size} file{selected.size !== 1 ? "s" : ""} selected
+            </p>
+          </div>
+          <button onClick={onClose} className="text-muted-foreground hover:text-foreground">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        {/* Search */}
+        <div className="px-5 py-3 border-b border-border">
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search by name or description..."
+            className="w-full px-3 py-1.5 text-sm rounded-lg border border-border bg-surface text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+          />
+        </div>
+
+        {/* File list */}
+        <div className="flex-1 overflow-y-auto px-5 py-3 space-y-1.5">
+          {loading ? (
+            <div className="flex justify-center py-8">
+              <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
+            </div>
+          ) : filtered.length === 0 ? (
+            <p className="text-sm text-muted-foreground text-center py-8">
+              {search ? "No files match your search." : "All files are already assigned to this department."}
+            </p>
+          ) : (
+            filtered.map((f) => {
+              const active = selected.has(f.file_id);
+              return (
+                <button
+                  key={f.file_id}
+                  onClick={() => toggle(f.file_id)}
+                  className={cn(
+                    "w-full flex items-start gap-3 px-3 py-2.5 rounded-lg border text-left transition-all",
+                    active
+                      ? "border-primary bg-primary/10"
+                      : "border-border hover:border-muted-foreground"
+                  )}
+                >
+                  <div className={cn(
+                    "w-4 h-4 mt-0.5 rounded border-2 shrink-0 flex items-center justify-center",
+                    active ? "bg-primary border-primary" : "border-muted-foreground"
+                  )}>
+                    {active && <CheckCircle2 className="w-3 h-3 text-primary-foreground" />}
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-xs font-medium text-foreground truncate">{f.name}</p>
+                    {f.current_domain && (
+                      <p className="text-[10px] text-amber-500">Currently in: {f.current_domain}</p>
+                    )}
+                    {f.ai_description && (
+                      <p className="text-[10px] text-muted-foreground line-clamp-1 mt-0.5">{f.ai_description}</p>
+                    )}
+                    {f.good_for && f.good_for.length > 0 && (
+                      <p className="text-[10px] text-muted-foreground mt-0.5 line-clamp-1">
+                        Good for: {f.good_for.slice(0, 3).join(", ")}
+                      </p>
+                    )}
+                  </div>
+                </button>
+              );
+            })
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="flex gap-2 px-5 py-4 border-t border-border">
+          <button
+            onClick={onClose}
+            className="flex-1 py-2 rounded-lg border border-border text-sm text-muted-foreground hover:text-foreground transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleSave}
+            disabled={selected.size === 0 || saving}
+            className="flex-1 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium disabled:opacity-40 hover:opacity-90 transition-opacity flex items-center justify-center gap-1.5"
+          >
+            {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+            Assign {selected.size > 0 ? `(${selected.size})` : ""}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
