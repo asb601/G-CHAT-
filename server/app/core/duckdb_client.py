@@ -30,7 +30,7 @@ def _get_connection(connection_string: str) -> duckdb.DuckDBPyConnection:
         cache = _thread_local.connections
     if key not in cache:
         conn = duckdb.connect()
-        conn.execute("INSTALL azure;")
+        conn.execute("INSTALL azure IF NOT EXISTS;")
         conn.execute("LOAD azure;")
         conn.execute("SET azure_transport_option_type = 'curl';")
         safe_conn = connection_string.replace("'", "''")
