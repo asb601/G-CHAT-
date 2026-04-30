@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import String, DateTime, Float, ForeignKey, BigInteger
+from sqlalchemy import String, DateTime, Float, ForeignKey, BigInteger, Boolean
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
 
@@ -29,6 +29,9 @@ class File(Base):
     blob_path: Mapped[str | None] = mapped_column(String(1000), nullable=True, unique=True)
     ingest_status: Mapped[str] = mapped_column(
         String(20), nullable=False, default="not_ingested"
+    )
+    is_preprocessed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
     )
     upload_duration_secs: Mapped[float | None] = mapped_column(
         Float, nullable=True

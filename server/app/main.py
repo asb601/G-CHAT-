@@ -52,6 +52,7 @@ async def lifespan(app: FastAPI):
         await _add_column_if_missing(conn, "files", "ingest_status", "VARCHAR(20) NOT NULL DEFAULT 'not_ingested'")
         await _add_column_if_missing(conn, "files", "uploaded_by_id", "VARCHAR(36) REFERENCES users(id) ON DELETE SET NULL")
         await _add_column_if_missing(conn, "files", "upload_duration_secs", "DOUBLE PRECISION")
+        await _add_column_if_missing(conn, "files", "is_preprocessed", "BOOLEAN NOT NULL DEFAULT FALSE")
         await _add_column_if_missing(conn, "folders", "container_id", "VARCHAR(36) REFERENCES container_configs(id) ON DELETE CASCADE")
         await _add_column_if_missing(conn, "users", "is_admin", "BOOLEAN NOT NULL DEFAULT FALSE")
 

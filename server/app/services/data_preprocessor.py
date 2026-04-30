@@ -247,6 +247,83 @@ class _BlockBlobWriter:
 # Public entry point
 # ══════════════════════════════════════════════════════════════════════════════
 
+@dataclass
+class ProbeResult:
+    """Lightweight result of the 256KB probe — no full download."""
+    safe_for_raw_sample: bool   # True = DuckDB can sample the raw file reliably
+    encoding:           str     # detected encoding
+    header_row_idx:     int     # 0 = header is first row; >0 = junk rows precede it
+    reason:             str     # why it's not safe (empty when safe)
+
+
+async def probe_raw_csv(
+    blob_path:         str,
+    file_name:         str,
+    connection_string: str,
+    container_name:    str,
+) -> ProbeResult:
+    """
+    Range-read the first 256 KB of a CSV/text blob and determine whether
+    DuckDB can reliably sample it without preprocessing first.
+
+    Unsafe conditions (require preprocessing before sampling):
+      1. Non-UTF-8 encoding  — DuckDB reads garbled/wrong strings
+      2. Leading junk rows   — DuckDB uses the junk as column names,
+                               making the AI description completely wrong
+
+    Everything else (dirty null strings like "N/A", whitespace, control
+    chars inside values) does not materially affect the AI description
+    and can be tolerated for the sample.
+    """
+    ext = Path(file_name).suffix.lower()
+    if ext not in TEXT_EXTS:
+        # Excel files are never safe to sample raw
+        return ProbeResult(safe_for_raw_sample=False, encoding="",
+                           header_row_idx=0, reason="excel")
+
+    def _run() -> ProbeResult:
+        svc = BlobServiceClient.from_connection_string(connection_string)
+        bc  = svc.get_blob_client(container=container_name, blob=blob_path)
+        raw = _probe_blob(bc, PROBE_BYTES)
+
+        encoding = _detect_encoding_from_bytes(raw)
+        # UTF-8-sig is fine for DuckDB (it handles the BOM)
+        clean_encoding = encoding in ("utf-8", "utf-8-sig", "ascii")
+        if not clean_encoding:
+            return ProbeResult(
+                safe_for_raw_sample=False,
+                encoding=encoding,
+                header_row_idx=0,
+                reason=f"non-utf8 encoding: {encoding}",
+            )
+
+        probe_text = raw.decode(encoding, errors="replace")
+        delimiter  = _detect_delimiter_from_str(probe_text, ext)
+        head_df = pd.read_csv(
+            io.StringIO(probe_text), sep=delimiter, header=None, dtype=str,
+            keep_default_na=False, nrows=HEADER_SCAN_ROWS, on_bad_lines="skip",
+        )
+        head_df = head_df.apply(_clean_str_series).apply(_nullify_series)
+        header_row_idx = _find_header_row(head_df)
+
+        if header_row_idx > 0:
+            return ProbeResult(
+                safe_for_raw_sample=False,
+                encoding=encoding,
+                header_row_idx=header_row_idx,
+                reason=f"{header_row_idx} leading junk row(s) before real header",
+            )
+
+        return ProbeResult(
+            safe_for_raw_sample=True,
+            encoding=encoding,
+            header_row_idx=0,
+            reason="",
+        )
+
+    return await asyncio.to_thread(_run)
+
+
 async def preprocess_file(
     blob_path:         str,
     file_name:         str,
@@ -280,7 +357,11 @@ async def preprocess_file(
                        file_name=file_name, file_type=file_type)
 
     # ── Probe size without downloading the file ───────────────────────────────
-    src_bc    = await asyncio.to_thread(_get_blob_client, connection_string, container_name, blob_path)
+    # Create BlobServiceClient once; reuse for src, dst, and properties checks.
+    svc_client    = await asyncio.to_thread(
+        BlobServiceClient.from_connection_string, connection_string
+    )
+    src_bc    = svc_client.get_blob_client(container=container_name, blob=blob_path)
     props     = await asyncio.to_thread(lambda: src_bc.get_blob_properties())
     file_size = props["size"]
     size_mb   = file_size / (1024 * 1024)
@@ -290,9 +371,7 @@ async def preprocess_file(
                        size_mb=round(size_mb, 1), streaming=is_large)
 
     clean_blob_path = f"preprocessed/{file_id}_clean.csv"
-    dst_bc          = await asyncio.to_thread(
-        _get_blob_client, connection_string, container_name, clean_blob_path
-    )
+    dst_bc          = svc_client.get_blob_client(container=container_name, blob=clean_blob_path)
     block_writer    = _BlockBlobWriter(dst_bc)
 
     if ext in EXCEL_EXTS:
@@ -301,7 +380,7 @@ async def preprocess_file(
             raw_path = os.path.join(tmpdir, f"raw{ext}")
             await asyncio.to_thread(
                 _download_blob_to_file,
-                blob_path, container_name, connection_string, raw_path,
+                src_bc, raw_path,
             )
             result = await asyncio.to_thread(
                 _process_excel_to_blob, raw_path, block_writer, ext, is_large, warns,
@@ -341,10 +420,10 @@ async def preprocess_file(
 # Azure client helpers
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _get_blob_client(conn_str: str, container: str, blob_path: str) -> BlobClient:
-    return BlobServiceClient.from_connection_string(conn_str).get_blob_client(
-        container=container, blob=blob_path
-    )
+def _get_blob_client(conn_str: str, container: str, blob_path: str,
+                     _svc: "BlobServiceClient | None" = None) -> BlobClient:
+    svc = _svc or BlobServiceClient.from_connection_string(conn_str)
+    return svc.get_blob_client(container=container, blob=blob_path)
 
 
 def _probe_blob(src_bc: BlobClient, length: int = PROBE_BYTES) -> bytes:
@@ -353,9 +432,8 @@ def _probe_blob(src_bc: BlobClient, length: int = PROBE_BYTES) -> bytes:
     return src_bc.download_blob(offset=0, length=actual).readall()
 
 
-def _download_blob_to_file(blob_path: str, container: str, conn_str: str, dest: str) -> None:
+def _download_blob_to_file(bc: BlobClient, dest: str) -> None:
     """Full download to a local file (used only for Excel)."""
-    bc = _get_blob_client(conn_str, container, blob_path)
     with open(dest, "wb") as fh:
         bc.download_blob().readinto(fh)
 
