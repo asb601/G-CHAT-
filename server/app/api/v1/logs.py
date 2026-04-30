@@ -17,7 +17,7 @@ import json
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -131,6 +131,50 @@ async def pipeline_stream(
             "X-Accel-Buffering": "no",  # tell nginx not to buffer SSE
         },
     )
+
+
+# ── Ingest-specific events endpoint ──────────────────────────────────────────
+
+# Events emitted by the ingest pipeline (ingestion_service + data_preprocessor
+# + analytics_service + parquet_service) — all carry pipeline="ingest" in
+# structlog contextvars so we can filter them out of ai_pipeline.log.
+_INGEST_EVENTS = {
+    "chain_start", "chain_end", "chain_skip", "cleanup", "step",
+    "preprocess", "analytics_compute", "parquet_conversion",
+    "parquet_conversion_job_update_failed", "status_update_failed",
+    "parquet_service",
+}
+
+
+@router.get("/ingest-events")
+async def ingest_events(
+    lines: int = Query(default=300, ge=1, le=2000),
+    _: User = Depends(require_admin),
+) -> dict:
+    """
+    Return the last N ingestion events from ai_pipeline.log.
+
+    Filters to lines where pipeline=='ingest' (set by _ensure_trace())
+    or whose event name is a known ingestion event.  Chat events are excluded.
+    """
+    path = LOG_DIR / "ai_pipeline.log"
+    if not path.is_file():
+        return {"total_lines": 0, "returned": 0, "lines": []}
+
+    all_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    ingest: list[dict] = []
+    for line in all_lines:
+        if not line.strip():
+            continue
+        try:
+            ev = json.loads(line)
+            if ev.get("pipeline") == "ingest" or ev.get("event") in _INGEST_EVENTS:
+                ingest.append(ev)
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    tail = ingest[-lines:]
+    return {"total_lines": len(ingest), "returned": len(tail), "lines": tail}
 
 
 # ── Generic log file endpoints ────────────────────────────────────────────────
@@ -267,3 +311,18 @@ async def search_log(
                 break
 
     return {"file": filename, "query": q, "matches": len(matches), "lines": matches}
+
+
+@router.get("/{filename}/download")
+async def download_log(
+    filename: str,
+    _: User = Depends(require_admin),
+) -> FileResponse:
+    """Download a raw log file as a plain-text attachment."""
+    path = _safe_log_path(filename)
+    return FileResponse(
+        path=str(path),
+        filename=filename,
+        media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
