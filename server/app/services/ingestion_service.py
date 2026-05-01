@@ -229,6 +229,27 @@ async def ingest_file(file_id: str, db: AsyncSession) -> None:
                                    status="skipped", reason="already_preprocessed",
                                    blob_path=file.blob_path)
 
+        # ── Guard: verify preprocessed blob still exists in Azure ────────────
+        # A prior buggy run may have deleted the preprocessed blob while leaving
+        # the DB path pointing at it.  Fail early with a clear message rather
+        # than letting DuckDB produce a cryptic IO error on step 1.
+        if already_preprocessed:
+            def _blob_exists() -> bool:
+                try:
+                    from azure.storage.blob import BlobServiceClient  # noqa: PLC0415
+                    bc = BlobServiceClient.from_connection_string(container.connection_string)
+                    return bc.get_blob_client(
+                        container=container.container_name, blob=file.blob_path
+                    ).exists()
+                except Exception:
+                    return False
+
+            if not await asyncio.to_thread(_blob_exists):
+                raise FileNotFoundError(
+                    f"Preprocessed blob '{file.blob_path}' no longer exists in Azure. "
+                    "Re-upload the original file to re-ingest."
+                )
+
         # ── Step 1/6 · Sample with DuckDB ────────────────────────────────────
         # For CSV/text, samples the raw file while preprocessing runs in background.
         # Falls back to awaiting the clean CSV only if the raw file is unreadable.

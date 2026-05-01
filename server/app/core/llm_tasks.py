@@ -55,12 +55,29 @@ Sample rows: {json.dumps(sample_rows[:3], default=str)}"""
         prompt_tokens = count_tokens(prompt, deployment)
 
         t = time.perf_counter()
-        response = client.chat.completions.create(
-            model=deployment,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=600,
-            temperature=0,
-        )
+        import openai as _openai  # noqa: PLC0415 — local import to avoid circular
+        _RETRY_DELAYS = [1, 5, 30]
+        response = None
+        for _attempt in range(len(_RETRY_DELAYS) + 1):
+            try:
+                response = client.chat.completions.create(
+                    model=deployment,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_completion_tokens=600,
+                    temperature=0,
+                )
+                break
+            except _openai.RateLimitError:
+                if _attempt >= len(_RETRY_DELAYS):
+                    raise
+                _delay = _RETRY_DELAYS[_attempt]
+                ingest_logger.warning(
+                    "llm_rate_limited",
+                    function="generate_file_description",
+                    attempt=_attempt + 1,
+                    retry_in_s=_delay,
+                )
+                time.sleep(_delay)
         duration = elapsed_ms(t)
         raw = response.choices[0].message.content
 

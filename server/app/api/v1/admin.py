@@ -66,7 +66,15 @@ async def _batch_reingest(file_ids: list[str]) -> None:
             try:
                 async with async_session() as db:
                     await ingest_file(file_id, db)
-                done += 1
+                # ingest_file catches all exceptions internally and sets
+                # ingest_status="failed" — check the actual outcome so the
+                # failed counter is accurate (not always 0).
+                async with async_session() as check_db:
+                    f = await check_db.get(File, file_id)
+                if f and f.ingest_status == "failed":
+                    failed += 1
+                else:
+                    done += 1
                 ingest_logger.info("reingest_progress", done=done, failed=failed,
                                    remaining=len(file_ids) - done - failed)
             except Exception as exc:
