@@ -503,9 +503,12 @@ async def ingest_file(file_id: str, db: AsyncSession) -> None:
             ingest_logger.info("step", step="5/5", name="compute_analytics", status="done",
                                row_count=analytics.row_count,
                                duration_ms=_ms(step_start))
-            if not already_preprocessed:
-                # Parquet conversion only needed on first ingest — Parquet already
-                # exists on re-ingest (is_preprocessed=True files skip this).
+            # Trigger parquet conversion whenever the parquet file is missing —
+            # regardless of whether the CSV was already preprocessed.  This covers:
+            #   • First ingest of a new file
+            #   • Re-ingest after parquet files were deleted
+            #   • Re-ingest after container was removed and re-connected
+            if not analytics.parquet_blob_path:
                 asyncio.ensure_future(trigger_parquet_conversion(
                     file_id=file_id,
                     blob_path=clean_blob_path,
@@ -514,7 +517,8 @@ async def ingest_file(file_id: str, db: AsyncSession) -> None:
                 ))
             else:
                 ingest_logger.info("step", step="5/5", name="parquet",
-                                   status="skipped", reason="already_preprocessed")
+                                   status="skipped", reason="parquet_already_exists",
+                                   parquet_path=analytics.parquet_blob_path)
         except Exception as analytics_exc:
             ingest_logger.warning("step", step="5/5", name="compute_analytics", status="failed",
                                   error=str(analytics_exc)[:300],
