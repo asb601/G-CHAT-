@@ -510,22 +510,61 @@ async def retry_missing_parquet(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """
-    Re-trigger Parquet conversion for all ingested CSV files that
-    haven't been converted yet.
+    Smart retry for files missing their Parquet conversion OR whose preprocessed
+    blob was deleted.  Two categories are handled:
+
+    1. Orphaned preprocessed blobs — files with is_preprocessed=True but the
+       preprocessed/ CSV no longer exists in Azure.  ingest_file() will auto-
+       recover these by finding the original raw blob and re-running the full
+       pipeline (preprocessing → AI description → parquet).
+
+    2. Ingested CSV files with no parquet_blob_path — normal parquet-only retry.
     """
-    result = await db.execute(
-        select(File).where(File.ingest_status == "ingested")
+    # Category 1: files that look preprocessed but blob_path is missing or
+    # points to a preprocessed/ path (likely orphaned after a clean-up)
+    orphaned_result = await db.execute(
+        select(File).where(
+            File.is_preprocessed == True,  # noqa: E712
+            File.blob_path.like("preprocessed/%"),
+        )
     )
-    files = list(result.scalars().all())
-    ingestable = [
-        f for f in files
-        if (f.name or "").rsplit(".", 1)[-1].lower() in ("csv", "txt", "tsv")
-        and f.blob_path
+    orphaned = list(orphaned_result.scalars().all())
+    orphaned_ids = [
+        f.id for f in orphaned
+        if (f.name or "").rsplit(".", 1)[-1].lower() in ("csv", "txt", "tsv", "xlsx", "xls")
     ]
 
-    file_ids = [f.id for f in ingestable]
+    # Category 2: ingested CSVs with no parquet yet
+    no_parquet_result = await db.execute(
+        select(File, FileAnalytics)
+        .join(FileAnalytics, FileAnalytics.file_id == File.id, isouter=True)
+        .where(
+            File.ingest_status == "ingested",
+            File.blob_path.isnot(None),
+        )
+    )
+    no_parquet_ids = [
+        f.id for f, fa in no_parquet_result.all()
+        if (f.name or "").rsplit(".", 1)[-1].lower() in ("csv", "txt", "tsv")
+        and (fa is None or not fa.parquet_blob_path)
+        and f.id not in orphaned_ids
+    ]
 
-    ingest_logger.info("retry_parquet_started", admin_id=admin.id, file_count=len(file_ids))
-    asyncio.create_task(_batch_reingest(file_ids))
+    all_ids = orphaned_ids + no_parquet_ids
 
-    return {"message": "Parquet retry started", "count": len(file_ids)}
+    ingest_logger.info(
+        "retry_parquet_started",
+        admin_id=admin.id,
+        orphaned=len(orphaned_ids),
+        missing_parquet=len(no_parquet_ids),
+        total=len(all_ids),
+    )
+    if all_ids:
+        asyncio.create_task(_batch_reingest(all_ids))
+
+    return {
+        "message": "Parquet retry started",
+        "orphaned_blobs": len(orphaned_ids),
+        "missing_parquet": len(no_parquet_ids),
+        "total": len(all_ids),
+    }
