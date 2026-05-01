@@ -550,6 +550,16 @@ async def retry_missing_parquet(
     from app.services.analytics_service import trigger_parquet_conversion
     from app.models.container import ContainerConfig
 
+    # ── Skip files that already have a parquet job currently running ────────
+    # Prevents double-clicking Retry All from launching duplicate work.
+    running_jobs = (await db.execute(
+        select(BackgroundJob.file_id).where(
+            BackgroundJob.job_type == "parquet_conversion",
+            BackgroundJob.status == "running",
+        )
+    )).scalars().all()
+    in_flight: set[str] = set(running_jobs)
+
     # ── Category 1: orphaned preprocessed blobs → full reingest ──────────────
     orphaned_result = await db.execute(
         select(File).where(
@@ -561,6 +571,7 @@ async def retry_missing_parquet(
     orphaned_ids = [
         f.id for f in orphaned
         if (f.name or "").rsplit(".", 1)[-1].lower() in ("csv", "txt", "tsv", "xlsx", "xls")
+        and f.id not in in_flight
     ]
 
     # ── Category 2: ingested CSVs missing parquet → parquet only ─────────────
@@ -583,16 +594,20 @@ async def retry_missing_parquet(
             continue
         if f.id in orphaned_ids:
             continue
+        if f.id in in_flight:  # already converting — skip
+            continue
         if not container or not container.connection_string:
             continue
         no_parquet_count += 1
         parquet_tasks.append((f.id, f.blob_path, container.connection_string, container.container_name))
 
+    skipped_in_flight = len(in_flight)
     ingest_logger.info(
         "retry_parquet_started",
         admin_id=admin.id,
         orphaned=len(orphaned_ids),
         missing_parquet=no_parquet_count,
+        skipped_in_flight=skipped_in_flight,
         total=len(orphaned_ids) + no_parquet_count,
     )
 
@@ -623,9 +638,13 @@ async def retry_missing_parquet(
     if parquet_tasks:
         asyncio.create_task(_run_parquet_tasks())
 
+    msg = "Parquet retry started"
+    if skipped_in_flight:
+        msg += f" — {skipped_in_flight} already running, skipped"
     return {
-        "message": "Parquet retry started",
+        "message": msg,
         "orphaned_blobs": len(orphaned_ids),
         "missing_parquet": no_parquet_count,
+        "skipped_in_flight": skipped_in_flight,
         "total": len(orphaned_ids) + no_parquet_count,
     }

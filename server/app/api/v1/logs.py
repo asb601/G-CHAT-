@@ -326,3 +326,20 @@ async def download_log(
         media_type="text/plain; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@router.delete("/{filename}", status_code=204)
+async def clear_log(
+    filename: str,
+    _: User = Depends(require_admin),
+) -> None:
+    """Truncate a log file to zero bytes for fresh logging.
+
+    Truncating (instead of deleting) preserves any open file handles held by
+    structlog/the logging module so writes continue to land in the same file.
+    """
+    path = _safe_log_path(filename)
+    # Open in write mode and immediately close — atomically truncates to 0 bytes
+    with open(path, "w", encoding="utf-8"):
+        pass
+    return None

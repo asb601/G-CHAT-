@@ -17,6 +17,7 @@ import {
   Loader2,
   Activity,
   Download,
+  Trash2,
 } from "lucide-react";
 import { apiFetch } from "@/lib/auth";
 import { useAuth } from "@/components/auth-provider";
@@ -1168,6 +1169,11 @@ function IngestionPanel() {
           className="p-1.5 rounded bg-surface-raised text-muted-foreground hover:text-foreground transition-colors">
           <Download className="w-3.5 h-3.5" />
         </button>
+        <button onClick={async () => { if (await clearLog("ai_pipeline.log")) fetchEvents(); }}
+          title="Clear ai_pipeline.log"
+          className="p-1.5 rounded bg-surface-raised text-muted-foreground hover:text-red-400 transition-colors">
+          <Trash2 className="w-3.5 h-3.5" />
+        </button>
         <span className="text-[10px] text-muted-foreground ml-auto hidden sm:block">
           {filtered.length} / {totalLines} events
         </span>
@@ -1420,6 +1426,15 @@ export default function AdminLogsPage() {
           className="p-1.5 rounded bg-surface-raised text-muted-foreground hover:text-foreground transition-colors"
         >
           <Download className="w-3.5 h-3.5" />
+        </button>
+
+        {/* Clear current log file */}
+        <button
+          onClick={async () => { if (await clearLog(activeFile)) fetchLogs(); }}
+          title={`Clear ${activeFile}`}
+          className="p-1.5 rounded bg-surface-raised text-muted-foreground hover:text-red-400 transition-colors"
+        >
+          <Trash2 className="w-3.5 h-3.5" />
         </button>
 
         {/* Line count */}

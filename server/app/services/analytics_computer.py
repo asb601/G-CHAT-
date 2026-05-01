@@ -1,6 +1,7 @@
 """Pure analytics computation on sample rows (no DB writes)."""
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import pandas as pd
@@ -33,8 +34,11 @@ _SKIP_COLS = {
 
 
 def json_safe_value(value: Any) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool)):
+    if value is None or isinstance(value, (str, int, bool)):
         return value
+    if isinstance(value, float):
+        # PostgreSQL JSON does not accept NaN/Inf — strip them
+        return None if math.isnan(value) or math.isinf(value) else value
     if hasattr(value, "isoformat"):
         return value.isoformat()
     return str(value)
@@ -66,9 +70,13 @@ def round_value(val: Any) -> Any:
     if val is None:
         return None
     try:
-        return round(float(val), 4)
+        f = float(val)
     except (ValueError, TypeError):
         return val
+    # PostgreSQL JSON does not accept NaN/Inf — strip them
+    if math.isnan(f) or math.isinf(f):
+        return None
+    return round(f, 4)
 
 
 def compute_sample_analytics(columns_info: list[dict], sample_rows: list[dict]) -> dict[str, Any]:
