@@ -970,6 +970,15 @@ async function downloadLog(filename: string): Promise<void> {
   } catch (e) { console.error("Download error:", e); }
 }
 
+async function clearLog(filename: string): Promise<boolean> {
+  if (!confirm(`Clear ${filename}? This will erase all current log entries.`)) return false;
+  try {
+    const res = await apiFetch(`/api/logs/${encodeURIComponent(filename)}`, { method: "DELETE" });
+    if (!res.ok) { console.error("Clear failed:", res.status); return false; }
+    return true;
+  } catch (e) { console.error("Clear error:", e); return false; }
+}
+
 /* ── Ingestion panel helpers ──────────────────────────────────────────────────── */
 
 function getIngestCfg(ev: LogEntry): { num: string; label: string; color: string } {
