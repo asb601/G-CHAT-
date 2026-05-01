@@ -545,15 +545,28 @@ interface MissingFile {
   name: string;
   blob_path: string;
   has_analytics: boolean;
+  job_status: string | null;
+  job_error: string | null;
+  last_attempt: string | null;
 }
 
 function ParquetTab() {
   const { data, error, isLoading, mutate } = useSWR<{ files: MissingFile[]; count: number }>(
     "/api/admin/missing-parquet",
     (url: string) => apiFetch(url).then((r) => r.json()),
+    { refreshInterval: 0 },
   );
   const [retrying, setRetrying] = useState(false);
   const [result, setResult] = useState<string | null>(null);
+  const [pollCount, setPollCount] = useState(0);
+
+  // Auto-refresh after retry: poll at 5s, 12s, 25s, 45s intervals
+  useEffect(() => {
+    if (pollCount === 0) return;
+    const delays = [5000, 12000, 25000, 45000];
+    const timers = delays.map((d) => setTimeout(() => mutate(), d));
+    return () => timers.forEach(clearTimeout);
+  }, [pollCount, mutate]);
 
   const retryAll = useCallback(async () => {
     setRetrying(true);
@@ -566,7 +579,7 @@ function ParquetTab() {
         ? ` (${body.orphaned_blobs} recovering, ${body.missing_parquet} parquet-only)`
         : ` (${total} files)`;
       setResult((body.message ?? "Started") + detail);
-      setTimeout(() => mutate(), 5000);
+      setPollCount((n) => n + 1);
     } catch {
       setResult("Failed to start retry");
     } finally {
@@ -613,12 +626,25 @@ function ParquetTab() {
       ) : (
         <div className="space-y-2">
           {files.map((f) => (
-            <div key={f.file_id} className="flex items-center justify-between p-3 bg-zinc-800/50 rounded-lg border border-zinc-700/50">
-              <div className="min-w-0">
-                <p className="text-sm font-medium text-zinc-200 truncate">{f.name}</p>
-                <p className="text-xs text-zinc-500 truncate">{f.blob_path}</p>
+            <div key={f.file_id} className="p-3 bg-zinc-800/50 rounded-lg border border-zinc-700/50 space-y-1">
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-sm font-medium text-zinc-200 truncate min-w-0">{f.name}</p>
+                {f.job_status === "failed" && (
+                  <span className="shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded bg-red-500/20 text-red-400 border border-red-500/30">failed</span>
+                )}
+                {f.job_status === "running" && (
+                  <span className="shrink-0 flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400 border border-amber-500/30">
+                    <Loader2 className="w-2.5 h-2.5 animate-spin" />running
+                  </span>
+                )}
+                {!f.job_status && (
+                  <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                )}
               </div>
-              <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 ml-3" />
+              <p className="text-xs text-zinc-500 truncate">{f.blob_path}</p>
+              {f.job_error && (
+                <p className="text-xs text-red-400 break-all">{f.job_error}</p>
+              )}
             </div>
           ))}
         </div>

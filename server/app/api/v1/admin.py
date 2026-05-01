@@ -29,6 +29,7 @@ from app.core.database import async_session, get_db
 from app.core.logger import ingest_logger
 from app.dependencies import get_current_user, require_admin
 from app.agent.graph.graph import invalidate_catalog_cache
+from app.models.background_job import BackgroundJob
 from app.models.file import File
 from app.models.file_analytics import FileAnalytics
 from app.models.file_metadata import FileMetadata
@@ -477,29 +478,55 @@ async def list_missing_parquet(
 ) -> dict:
     """
     Return all CSV/TSV files that have been ingested but whose Parquet
-    conversion record is missing or incomplete.
+    conversion record is missing or incomplete.  Includes the latest
+    BackgroundJob status and error message so the UI can show why it failed.
     """
-    from app.models.file_analytics import FileAnalytics as _FA
-
     rows = (await db.execute(
-        select(File, _FA)
-        .join(_FA, _FA.file_id == File.id, isouter=True)
+        select(File, FileAnalytics)
+        .join(FileAnalytics, FileAnalytics.file_id == File.id, isouter=True)
         .where(File.ingest_status == "ingested")
     )).all()
 
-    missing = []
+    # Collect file_ids that are missing parquet
+    candidates = []
     for file, analytics in rows:
         ext = (file.name or "").rsplit(".", 1)[-1].lower()
         if ext not in ("csv", "txt", "tsv"):
             continue
-        # A file is "missing parquet" if analytics doesn't exist OR parquet path is empty
         if analytics is None or not analytics.parquet_blob_path:
-            missing.append({
-                "file_id": file.id,
-                "name": file.name,
-                "blob_path": file.blob_path,
-                "has_analytics": analytics is not None,
-            })
+            candidates.append((file, analytics))
+
+    if not candidates:
+        return {"files": [], "count": 0}
+
+    # Fetch latest BackgroundJob per file in one query
+    candidate_ids = [f.id for f, _ in candidates]
+    job_rows = (await db.execute(
+        select(BackgroundJob)
+        .where(
+            BackgroundJob.file_id.in_(candidate_ids),
+            BackgroundJob.job_type == "parquet_conversion",
+        )
+        .order_by(BackgroundJob.started_at.desc())
+    )).scalars().all()
+    # Keep only the most recent job per file
+    latest_job: dict[str, BackgroundJob] = {}
+    for job in job_rows:
+        if job.file_id not in latest_job:
+            latest_job[job.file_id] = job
+
+    missing = []
+    for file, analytics in candidates:
+        job = latest_job.get(file.id)
+        missing.append({
+            "file_id": file.id,
+            "name": file.name,
+            "blob_path": file.blob_path,
+            "has_analytics": analytics is not None,
+            "job_status": job.status if job else None,
+            "job_error": job.error_message if job else None,
+            "last_attempt": job.started_at.isoformat() if job and job.started_at else None,
+        })
 
     return {"files": missing, "count": len(missing)}
 
@@ -576,12 +603,22 @@ async def retry_missing_parquet(
     # Fire parquet-only conversions directly — bypasses the already_preprocessed skip
     async def _run_parquet_tasks() -> None:
         for file_id, blob_path, conn_str, cont_name in parquet_tasks:
-            await trigger_parquet_conversion(
-                file_id=file_id,
-                blob_path=blob_path,
-                connection_string=conn_str,
-                container_name=cont_name,
-            )
+            try:
+                await trigger_parquet_conversion(
+                    file_id=file_id,
+                    blob_path=blob_path,
+                    connection_string=conn_str,
+                    container_name=cont_name,
+                )
+            except Exception as exc:
+                # trigger_parquet_conversion already logs to BackgroundJob;
+                # this guard keeps the loop running for the remaining files.
+                ingest_logger.warning(
+                    "retry_parquet_task_failed",
+                    file_id=file_id,
+                    blob_path=blob_path,
+                    error=str(exc)[:500],
+                )
 
     if parquet_tasks:
         asyncio.create_task(_run_parquet_tasks())
