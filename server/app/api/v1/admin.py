@@ -47,11 +47,11 @@ async def cost_summary(current_user: User = Depends(get_current_user)) -> dict:
 
 # ── Re-ingest all files ──────────────────────────────────────────────────────
 
-_REINGEST_SEMAPHORE = asyncio.Semaphore(3)
+_REINGEST_SEMAPHORE = asyncio.Semaphore(2)  # 2 concurrent ingests — safer for Azure API limits
 
 
 async def _batch_reingest(file_ids: list[str]) -> None:
-    """Re-ingest a list of files with concurrency capped at 3."""
+    """Re-ingest a list of files with concurrency capped at 2."""
     done = 0
     failed = 0
 
