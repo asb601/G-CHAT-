@@ -561,7 +561,11 @@ function ParquetTab() {
     try {
       const res = await apiFetch("/api/admin/retry-parquet", { method: "POST" });
       const body = await res.json();
-      setResult(body.message + ` (${body.count} files)`);
+      const total = body.total ?? body.count ?? 0;
+      const detail = body.orphaned_blobs !== undefined
+        ? ` (${body.orphaned_blobs} recovering, ${body.missing_parquet} parquet-only)`
+        : ` (${total} files)`;
+      setResult((body.message ?? "Started") + detail);
       setTimeout(() => mutate(), 5000);
     } catch {
       setResult("Failed to start retry");
