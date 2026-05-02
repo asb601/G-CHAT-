@@ -129,6 +129,18 @@ async def trigger_parquet_conversion(
                 analytics_row.parquet_size_bytes = parquet_size
                 if total_rows:
                     analytics_row.row_count = total_rows
+            else:
+                # No FileAnalytics row exists — create a minimal one so the
+                # parquet_blob_path is persisted and the file no longer shows
+                # as "missing parquet" on the next check.
+                new_analytics = FileAnalytics(
+                    id=str(uuid.uuid4()),
+                    file_id=file_id,
+                    parquet_blob_path=parquet_path,
+                    parquet_size_bytes=parquet_size,
+                    row_count=total_rows or 0,
+                )
+                db.add(new_analytics)
 
             if total_rows:
                 meta_row = (

@@ -17,7 +17,6 @@ from app.models.container import ContainerConfig
 from app.models.file import File
 from app.models.file_analytics import FileAnalytics
 from app.models.file_metadata import FileMetadata
-from app.models.folder import Folder
 from app.services.analytics_service import compute_and_store_analytics, trigger_parquet_conversion
 from app.services.data_preprocessor import ALL_EXTS as _PREPROCESS_EXTS, preprocess_file, probe_raw_csv
 
@@ -38,8 +37,7 @@ def _ensure_trace(file_id: str) -> None:
 
 
 async def _delete_blob_silent(connection_string: str, container_name: str, blob_path: str) -> None:
-    """Delete a blob from Azure. Swallows all errors (blob may not exist yet)."""
-    import asyncio
+    """Delete a blob from Azure. Swallows all errors (blob may not exist)."""
     def _run() -> None:
         try:
             from azure.storage.blob import BlobServiceClient  # noqa: PLC0415
@@ -95,48 +93,19 @@ async def ingest_file(file_id: str, db: AsyncSession) -> None:
         is_excel = ext in {".xlsx", ".xls", ".xlsm", ".xlsb"}
         already_preprocessed = bool(file.is_preprocessed)
 
-        # ── Auto-detect: blob_path already points to a clean CSV ─────────────
-        # Happens when is_preprocessed was never backfilled for files that were
-        # preprocessed before the column was added (column defaults to FALSE).
-        # Detecting by path prefix is reliable — raw blobs never live under
-        # preprocessed/; only clean CSVs written by preprocess_file() do.
-        if not already_preprocessed and file.blob_path and file.blob_path.startswith("preprocessed/"):
-            already_preprocessed = True
-            file.is_preprocessed = True
-            await db.commit()
-            ingest_logger.info("step", step="0/6", name="preprocess",
-                               status="skipped", reason="auto_detected_clean_path",
-                               blob_path=file.blob_path)
-
-        # ── Pre-flight cleanup for full pipeline (not already preprocessed) ───
-        # If a previous partial or full ingest left stale clean CSV / Parquet
-        # blobs in Azure, delete them now before we overwrite.  This prevents
-        # the agent from reading a partially-overwritten Parquet during conversion.
-        # Also clears parquet_blob_path in the DB so no stale path is served.
+        # ── Pre-flight: clear stale parquet path on retry/reingest ───────────
+        # If a previous parquet was generated, drop the path so a fresh parquet
+        # is produced from the (possibly newly cleaned) CSV.  The actual blob
+        # is overwritten safely later by parquet_service (overwrite=True).
         if ext in _PREPROCESS_EXTS and not already_preprocessed:
             analytics_row = (
                 await db.execute(select(FileAnalytics).where(FileAnalytics.file_id == file_id))
             ).scalar_one_or_none()
-
-            stale_parquet = analytics_row.parquet_blob_path if analytics_row else None
-            stale_clean_csv = f"preprocessed/{file_id}_clean.csv"
-
             if analytics_row and analytics_row.parquet_blob_path:
                 analytics_row.parquet_blob_path = None
                 analytics_row.parquet_size_bytes = None
                 await db.commit()
                 ingest_logger.info("cleanup", action="cleared_parquet_path", file_id=file_id)
-
-            # Fire Azure deletions in parallel — non-fatal if blobs don't exist yet
-            await asyncio.gather(
-                _delete_blob_silent(container.connection_string, container.container_name,
-                                    stale_clean_csv),
-                _delete_blob_silent(container.connection_string, container.container_name,
-                                    stale_parquet) if stale_parquet else asyncio.sleep(0),
-                return_exceptions=True,
-            )
-            ingest_logger.info("cleanup", action="stale_blobs_deleted",
-                               clean_csv=stale_clean_csv, parquet=stale_parquet)
 
         # ── Step 0 · Preprocess ───────────────────────────────────────────────
         # Skipped entirely when file.is_preprocessed=True — the clean CSV
@@ -230,19 +199,11 @@ async def ingest_file(file_id: str, db: AsyncSession) -> None:
                                    status="skipped", reason="already_preprocessed",
                                    blob_path=file.blob_path)
 
-        # ── Guard: verify preprocessed blob still exists in Azure ────────────
-        # A prior buggy run may have deleted the preprocessed blob while leaving
-        # the DB path pointing at it.
-        #
-        # Recovery order:
-        #   1. Check if preprocessed blob exists — if yes, proceed normally.
-        #   2. If missing, try to find the original raw blob in Azure:
-        #      a. folder/file.name  (for files inside a container sub-folder)
-        #      b. file.name         (for root-level container blobs)
-        #      If found → reset blob_path + is_preprocessed and re-run full pipeline.
-        #   3. If nothing found → wipe metadata/analytics and reset to not_ingested.
-        if already_preprocessed:
-            stale_blob_path = file.blob_path
+        # ── Guard: verify the source blob still exists in Azure ──────────────
+        # With in-place overwrite, blob_path always points to the single source
+        # of truth.  If it's missing, the user deleted it from the container —
+        # mark not_ingested so the next sync re-discovers it cleanly.
+        if file.blob_path:
             _conn_str = container.connection_string
             _cont_name = container.container_name
 
@@ -254,77 +215,26 @@ async def ingest_file(file_id: str, db: AsyncSession) -> None:
                 except Exception:
                     return False
 
-            if not await asyncio.to_thread(_check_blob, stale_blob_path):
-                # Build candidate raw paths to probe
-                raw_candidates: list[str] = [file.name]  # root-level blob
-
-                # If inside a sub-folder, reconstruct the full blob path
-                if file.folder_id:
-                    parts: list[str] = []
-                    cur_folder_id: str | None = file.folder_id
-                    for _ in range(20):  # depth guard
-                        if not cur_folder_id:
-                            break
-                        folder_row = await db.get(Folder, cur_folder_id)
-                        if not folder_row:
-                            break
-                        parts.append(folder_row.name)
-                        cur_folder_id = folder_row.parent_id
-                    if parts:
-                        folder_prefix = "/".join(reversed(parts))
-                        raw_candidates.insert(0, f"{folder_prefix}/{file.name}")
-
-                recovered_path: str | None = None
-                for candidate in raw_candidates:
-                    if await asyncio.to_thread(_check_blob, candidate):
-                        recovered_path = candidate
-                        break
-
-                if recovered_path:
-                    # Raw blob still in Azure — reset to it and run the full pipeline
-                    ingest_logger.info(
-                        "orphaned_blob_recovered",
-                        stale_blob_path=stale_blob_path,
-                        raw_blob_path=recovered_path,
-                        action="resetting to raw path — will preprocess + ingest fresh",
-                    )
-                    file.blob_path = recovered_path
-                    file.is_preprocessed = False
-                    already_preprocessed = False
-                    await db.commit()
-                    # fall through — normal pipeline continues from step 0
-
-                else:
-                    # Truly gone — wipe stale data and mark not_ingested
-                    ingest_logger.warning(
-                        "orphaned_blob_unrecoverable",
-                        blob_path=stale_blob_path,
-                        candidates_tried=raw_candidates,
-                        action="wiping record — no blob found in Azure",
-                    )
-                    stale_meta = (
-                        await db.execute(select(FileMetadata).where(FileMetadata.file_id == file_id))
-                    ).scalar_one_or_none()
-                    if stale_meta:
-                        await db.delete(stale_meta)
-
-                    stale_analytics = (
-                        await db.execute(select(FileAnalytics).where(FileAnalytics.file_id == file_id))
-                    ).scalar_one_or_none()
-                    if stale_analytics:
-                        await db.delete(stale_analytics)
-
-                    file.blob_path = None
-                    file.is_preprocessed = False
-                    file.ingest_status = "not_ingested"
-                    await db.commit()
-                    ingest_logger.info(
-                        "orphaned_blob_unrecoverable",
-                        blob_path=stale_blob_path,
-                        status="done",
-                        message="File reset to not_ingested. No raw blob found anywhere in Azure.",
-                    )
-                    return
+            if not await asyncio.to_thread(_check_blob, file.blob_path):
+                ingest_logger.warning(
+                    "blob_missing_in_azure",
+                    blob_path=file.blob_path,
+                    action="resetting to not_ingested",
+                )
+                stale_meta = (
+                    await db.execute(select(FileMetadata).where(FileMetadata.file_id == file_id))
+                ).scalar_one_or_none()
+                if stale_meta:
+                    await db.delete(stale_meta)
+                stale_analytics = (
+                    await db.execute(select(FileAnalytics).where(FileAnalytics.file_id == file_id))
+                ).scalar_one_or_none()
+                if stale_analytics:
+                    await db.delete(stale_analytics)
+                file.is_preprocessed = False
+                file.ingest_status = "not_ingested"
+                await db.commit()
+                return
 
         # ── Step 1/6 · Sample with DuckDB ────────────────────────────────────
         # For CSV/text, samples the raw file while preprocessing runs in background.

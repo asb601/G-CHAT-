@@ -36,7 +36,9 @@ Cleaning stages (per-chunk for large files, once for small)
   6.  Duplicate removal    — ONLY for small files; skipped for large
   7.  Output              — written as Azure Block Blob (staged 4 MB blocks)
 
-Output: clean UTF-8 CSV at preprocessed/{file_id}_clean.csv in same container.
+Output: clean UTF-8 CSV.
+        - CSV / text  →  same blob path, overwritten in place (Azure atomic block commit).
+        - Excel       →  sibling .csv blob next to the .xlsx (Excel can't be overwritten).
 """
 from __future__ import annotations
 
@@ -346,7 +348,9 @@ async def preprocess_file(
         Bounded by CHUNK_ROWS (100 000 rows ~ 200 MB) for any file size.
         For small files (<= 50 MB) the full dataframe is kept for dedup.
 
-    Output blob: preprocessed/{file_id}_clean.csv
+    Output blob:
+        CSV / text  →  same path as input (overwritten in place atomically).
+        Excel       →  sibling .csv blob (same folder, .xlsx → .csv).
     """
     t0 = time.perf_counter()
     warns: list[str] = []
@@ -370,7 +374,20 @@ async def preprocess_file(
     ingest_logger.info("preprocess", status="probed",
                        size_mb=round(size_mb, 1), streaming=is_large)
 
-    clean_blob_path = f"preprocessed/{file_id}_clean.csv"
+    # ── Output blob path: NEW INDUSTRY DESIGN ─────────────────────────────────
+    # CSV / text → overwrite the SAME blob path in place.
+    #              Azure block blob commit_block_list is atomic — readers continue
+    #              to see the old content until the final commit, then the blob
+    #              atomically swaps to the clean content.  Zero extra storage.
+    # Excel      → write a sibling .csv next to the .xlsx (Excel cannot be
+    #              overwritten with CSV; different format).  blob_path will
+    #              be updated by the caller to point to the new .csv.
+    if ext in EXCEL_EXTS:
+        # report.xlsx → report.csv  (same folder)
+        clean_blob_path = blob_path[: -len(ext)] + ".csv"
+    else:
+        # billing.csv → billing.csv  (overwritten in place, atomic)
+        clean_blob_path = blob_path
     dst_bc          = svc_client.get_blob_client(container=container_name, blob=clean_blob_path)
     block_writer    = _BlockBlobWriter(dst_bc)
 

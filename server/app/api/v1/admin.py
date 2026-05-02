@@ -537,15 +537,12 @@ async def retry_missing_parquet(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """
-    Smart retry split into two separate paths:
+    Retry parquet conversion for any ingested CSV/text file that is missing its
+    parquet_blob_path. Calls trigger_parquet_conversion() directly — does NOT
+    re-run AI description, embedding, or metadata.
 
-    1. Orphaned preprocessed blobs — files with is_preprocessed=True but the
-       preprocessed/ CSV no longer exists in Azure.  Full reingest via ingest_file()
-       which auto-recovers the raw blob and re-runs the full pipeline.
-
-    2. Ingested CSVs with no parquet_blob_path — the ingest succeeded but parquet
-       conversion was skipped or timed out.  Calls trigger_parquet_conversion()
-       directly — does NOT re-run AI description or metadata.
+    With the in-place overwrite design, the blob_path always points to the single
+    source-of-truth clean CSV — there are no orphaned blob paths to recover.
     """
     from app.services.analytics_service import trigger_parquet_conversion
     from app.models.container import ContainerConfig
@@ -560,21 +557,7 @@ async def retry_missing_parquet(
     )).scalars().all()
     in_flight: set[str] = set(running_jobs)
 
-    # ── Category 1: orphaned preprocessed blobs → full reingest ──────────────
-    orphaned_result = await db.execute(
-        select(File).where(
-            File.is_preprocessed == True,  # noqa: E712
-            File.blob_path.like("preprocessed/%"),
-        )
-    )
-    orphaned = list(orphaned_result.scalars().all())
-    orphaned_ids = [
-        f.id for f in orphaned
-        if (f.name or "").rsplit(".", 1)[-1].lower() in ("csv", "txt", "tsv", "xlsx", "xls")
-        and f.id not in in_flight
-    ]
-
-    # ── Category 2: ingested CSVs missing parquet → parquet only ─────────────
+    # ── Ingested CSVs missing parquet → parquet only ─────────────────────────
     no_parquet_rows = (await db.execute(
         select(File, FileAnalytics, ContainerConfig)
         .join(FileAnalytics, FileAnalytics.file_id == File.id, isouter=True)
@@ -592,8 +575,6 @@ async def retry_missing_parquet(
             continue
         if fa is not None and fa.parquet_blob_path:
             continue
-        if f.id in orphaned_ids:
-            continue
         if f.id in in_flight:  # already converting — skip
             continue
         if not container or not container.connection_string:
@@ -605,17 +586,12 @@ async def retry_missing_parquet(
     ingest_logger.info(
         "retry_parquet_started",
         admin_id=admin.id,
-        orphaned=len(orphaned_ids),
         missing_parquet=no_parquet_count,
         skipped_in_flight=skipped_in_flight,
-        total=len(orphaned_ids) + no_parquet_count,
+        total=no_parquet_count,
     )
 
-    # Fire orphaned files through full reingest
-    if orphaned_ids:
-        asyncio.create_task(_batch_reingest(orphaned_ids))
-
-    # Fire parquet-only conversions directly — bypasses the already_preprocessed skip
+    # Fire parquet conversions sequentially — one per file to avoid OOM on big CSVs
     async def _run_parquet_tasks() -> None:
         for file_id, blob_path, conn_str, cont_name in parquet_tasks:
             try:
@@ -643,8 +619,7 @@ async def retry_missing_parquet(
         msg += f" — {skipped_in_flight} already running, skipped"
     return {
         "message": msg,
-        "orphaned_blobs": len(orphaned_ids),
         "missing_parquet": no_parquet_count,
         "skipped_in_flight": skipped_in_flight,
-        "total": len(orphaned_ids) + no_parquet_count,
+        "total": no_parquet_count,
     }
