@@ -157,6 +157,7 @@ class PreprocessResult:
     encoding:        str  = "utf-8"
     file_type:       str  = "csv"
     used_streaming:  bool = False
+    already_clean:   bool = False  # True = probe showed no changes needed, full scan skipped
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -414,12 +415,14 @@ async def preprocess_file(
                        original_rows=result["original_rows"],
                        clean_rows=result["clean_rows"],
                        rows_dropped=result["original_rows"] - result["clean_rows"],
-                       streaming=is_large)
+                       streaming=is_large,
+                       already_clean=result.get("already_clean", False))
 
     ingest_logger.info("preprocess", status="done",
                        clean_blob_path=clean_blob_path,
                        duration_ms=round((time.perf_counter() - t0) * 1000, 1))
 
+    already_clean = result.get("already_clean", False)
     return PreprocessResult(
         clean_blob_path=clean_blob_path,
         original_rows=result["original_rows"],
@@ -430,6 +433,7 @@ async def preprocess_file(
         encoding=result.get("encoding", "utf-8"),
         file_type=file_type,
         used_streaming=is_large,
+        already_clean=already_clean,
     )
 
 
@@ -509,6 +513,46 @@ def _process_text_stream(
     sample_df  = sample_df.apply(_clean_str_series).apply(_nullify_series)
     converters = _build_converters(sample_df, headers, warns)
 
+    # ── Fast path: skip full rewrite for large files that are already clean ────
+    # For files >50 MB we check 5 probe conditions from Pass 1 data only.
+    # If ALL met, the file is already a clean UTF-8 comma-delimited CSV with no
+    # dirty null values → skip the 3-6 GB network round-trip entirely.
+    #
+    # Conditions:
+    #   1. UTF-8 / ASCII encoding  (no re-encoding needed)
+    #   2. Header at row 0         (no junk rows to skip)
+    #   3. Delimiter is ','        (output is always comma)
+    #   4. Column names unchanged  (no Unnamed: N, no dedup renames)
+    #   5. Sample has no null-like strings  (e.g. 'N/A', 'null', 'none')
+    if is_large:
+        cell_strs      = [str(v) if v is not None else "" for v in head_df.iloc[header_row_idx]]
+        headers_clean  = (cell_strs == raw_headers) and not cols_renamed
+        encoding_clean = encoding in ("utf-8", "utf-8-sig", "ascii")
+        delimiter_clean = delimiter == ","
+
+        if encoding_clean and header_row_idx == 0 and delimiter_clean and headers_clean:
+            # Re-read raw sample WITHOUT _nullify_series, compare to nullified version
+            raw_sample = pd.read_csv(
+                io.StringIO(probe_text), sep=delimiter, header=None, dtype=str,
+                names=headers, keep_default_na=False, skiprows=1,
+                nrows=TYPE_DETECT_SAMPLE_ROWS, on_bad_lines="skip",
+            ).apply(_clean_str_series)
+            sample_nullified = raw_sample.copy().apply(_nullify_series)
+            no_null_changes  = raw_sample.fillna("").equals(sample_nullified.fillna(""))
+
+            if no_null_changes:
+                warns.append(
+                    "fast_path: file is already clean UTF-8 CSV — "
+                    "full rewrite skipped (probe passed all 5 checks)"
+                )
+                return {
+                    "original_rows": 0,
+                    "clean_rows":    0,
+                    "cols_renamed":  cols_renamed,
+                    "encoding":      encoding,
+                    "already_clean": True,
+                }
+
     # ── Pass 2: full streaming read ────────────────────────────────────────────
     downloader = src_bc.download_blob()
     raw_stream = io.BufferedReader(_AzureRawStream(downloader), buffer_size=8 * 1024 * 1024)
@@ -560,6 +604,7 @@ def _process_text_stream(
         "clean_rows":    clean_rows,
         "cols_renamed":  cols_renamed,
         "encoding":      encoding,
+        "already_clean": False,
     }
 
 
