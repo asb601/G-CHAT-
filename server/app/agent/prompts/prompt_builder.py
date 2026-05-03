@@ -51,6 +51,29 @@ Container: {container_name}
 4. inspect_data_format — Preview raw rows for a specific file before writing filters.
 5. summarise_dataframe — Compute stats on the last SQL result.
 
+--- DATE / PERIOD FILTERS (read this before any date query) ---
+For any question involving a year, fiscal year, quarter, period, or date range:
+  1. Call get_file_schema on the file first. Find the date/year column — check its dtype and sample_values.
+  2. Write the WHERE clause in the EXACT format the samples show:
+     - samples are 2021.0  →  WHERE col = 2021.0
+     - samples are '2021'  →  WHERE col = '2021'
+     - samples are 2021    →  WHERE col = 2021
+     - samples are full dates (2021-04-01)  →  WHERE EXTRACT(YEAR FROM col) = 2021
+  3. If the query still returns 0 rows: run SELECT MIN(col), MAX(col), COUNT(*) to find the actual range, then IMMEDIATELY re-run the original query using a year that exists in the data. Never stop after reporting the range — always follow up with the corrected query in the same response.
+
+--- QUESTION TYPE ROUTING ---
+
+Before doing anything, classify the user's question:
+
+**Type A — Conceptual / structural / process questions**: "how does X work", "what is the flow for Y", "explain Z", "what tables exist for X", "describe the OTC process", "what documents are created in step N". These questions ask about process, structure, or domain knowledge — NOT about data values.
+  → Answer directly from your knowledge and the file descriptions in the shortlist above. Do NOT run any SQL. Do NOT call any tools unless you genuinely need a column list.
+  → Write a clear explanation in plain English. Use bullet points or numbered steps where appropriate. No data table required.
+
+**Type B — Data questions**: "show me", "list", "how many", "what is the total", "top N", "filter by", "compare", specific values/dates/entities. These require SQL against actual files.
+  → Follow the HOW TO WORK steps below. Run SQL. Produce a full analyst response.
+
+When in doubt: if the question contains no specific values, counts, or time ranges to filter on — it is Type A.
+
 --- OUTPUT STYLE (MANDATORY) ---
 
 Do NOT narrate your reasoning, plans, or next steps. Do NOT write phrases like "Let me start by…", "Next I will…", "Plan: 1. …", "I'll now query…". Reasoning happens silently via tool calls.
@@ -59,14 +82,14 @@ When you finish, write a complete, analyst-quality response. Structure it as fol
 
 1. **Direct answer** — one sentence that directly answers the question (e.g. "The top 5 customers by outstanding balance are listed below, totalling $4.2M across 312 open invoices.").
 
-2. **Data table** — Markdown table with exact columns and rows from the SQL result. Match the exact row count requested. Format numbers with commas. Use column headers exactly as returned.
+2. **Data table** — *(Only for Type B data questions where SQL was executed.)* Markdown table with exact columns and rows from the SQL result. Match the exact row count requested. Format numbers with commas. Use column headers exactly as returned. Skip this section entirely for conceptual/process questions.
 
 3. **Key insights** — 2–4 bullet points interpreting the data for the user. Highlight patterns, outliers, notable comparisons, or anything actionable. Write as a business analyst would, not as a database tool. Examples:
    - "Customer X accounts for 38% of total open balance despite being ranked 2nd by invoice count"
    - "All top 5 balances are in 90+ day aging — overdue risk is concentrated at the top"
    - "Q1 invoices make up 70% of the outstanding amount — collections may have slowed in January"
 
-4. **Source** — one short line stating which file(s) the data came from and what filter was applied.
+4. **Source** — one short line stating which file(s) the data came from and what filter was applied. For conceptual answers, cite the file descriptions you used.
 
 Only state numeric totals or aggregates that are explicitly present as columns in the SQL result rows. Do not compute numbers not in the result.
 
@@ -93,7 +116,7 @@ Before writing any JOIN, compare the column TYPES and a few sample values from e
   - If you cannot find a compatible name file, STILL ANSWER THE USER. Run the metric query against the primary file alone, return the raw foreign-key ID values in place of the missing name column, and tell the user in one sentence that the name enrichment was unavailable because no compatible name file exists. Never reply 'no data found' just because the join failed — the metric data exists; only the enrichment is missing.
   - If a JOIN fails with a type / cast / conversion error, do not retry the same join with extra CASTs. Treat it as 'incompatible IDs' and follow the steps above.  - Prefer answering from a single file when possible. Only JOIN when the user explicitly needs data that genuinely lives in two separate files. A working single-file answer with raw IDs is always better than a JOIN that silently matches nothing.
 --- EMPTY RESULTS ---
-If a run_sql returns 0 rows and the WHERE clause uses a relative time window (CURRENT_DATE, NOW(), INTERVAL ...), the data simply does not fall in that window — do NOT call search_catalog or pivot to other files. Instead run one follow-up query: SELECT MIN(date_col), MAX(date_col), COUNT(*) FROM <same_file>; and report the actual date range the data covers so the user can ask again with a sensible window.
+If a run_sql returns 0 rows and the WHERE clause uses a relative time window (CURRENT_DATE, NOW(), INTERVAL ...), the data does not fall in that window — do NOT pivot to other files. Run: SELECT MIN(date_col), MAX(date_col), COUNT(*) FROM <same_file>; then re-query using a date value that actually exists in the data.
 
 If a run_sql returns 0 rows for an entity-name lookup (LIKE / equality on a name column), follow the entity-discovery steps above (verify samples first, search_catalog for alternate masters, never re-run an identical filter).
 
@@ -101,6 +124,11 @@ If a run_sql returns 0 rows for an entity-name lookup (LIKE / equality on a name
 - Date diff: datediff('day', start_col, end_col)
 - Aging buckets: CASE WHEN datediff('day', <date_col>, current_date) BETWEEN 0 AND 30 THEN '0-30' ... END
 - String cast: col::VARCHAR
+- Year column stored as float64 (Oracle EBS common): TRY_CAST(PERIOD_YEAR AS INTEGER) = 2021  OR  PERIOD_YEAR = 2021.0
+- Year column stored as INTEGER: PERIOD_YEAR = 2021
+- Year from a full date column: EXTRACT(YEAR FROM date_col) = 2021
+- Safe year cast (handles int/float/string): PERIOD_YEAR::INTEGER = 2021
+- Date range filter: date_col BETWEEN DATE '2021-01-01' AND DATE '2021-12-31'
 
 Max {max_calls} tool calls total.
 """
@@ -134,6 +162,28 @@ def build_parquet_note(
             key_metrics = (entry.get("key_metrics") or []) if entry else []
             if key_metrics:
                 line += f"\n    Key metrics: {', '.join(key_metrics[:6])}"
+
+            # Surface date range so LLM knows what period the file covers
+            dr_start = entry.get("date_range_start") if entry else None
+            dr_end = entry.get("date_range_end") if entry else None
+            if dr_start or dr_end:
+                line += f"\n    Date range: {dr_start or '?'} \u2192 {dr_end or '?'}"
+
+            # Surface min/max for year/period/date-like numeric columns so LLM
+            # knows the column type (float vs int) and data range on first query.
+            _DATE_HINTS = ("year", "date", "period", "month", "fiscal", "quarter", "fy")
+            col_stats = (entry.get("column_stats") or {}) if entry else {}
+            range_parts = []
+            for col_name, stats in col_stats.items():
+                if stats.get("dtype") == "numeric" and any(
+                    h in col_name.lower() for h in _DATE_HINTS
+                ):
+                    mn, mx = stats.get("min"), stats.get("max")
+                    if mn is not None and mx is not None:
+                        range_parts.append(f"{col_name}: {mn}\u2013{mx}")
+            if range_parts:
+                line += f"\n    Column ranges: {', '.join(range_parts[:4])}"
+
             lines.append(line)
 
         note = (

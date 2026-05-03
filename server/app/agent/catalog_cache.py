@@ -99,6 +99,13 @@ async def load_catalog(
     all_analytics_rows = list((await db.execute(select(FileAnalytics))).scalars().all())
     analytics_by_file = {row.file_id: row for row in all_analytics_rows}
 
+    # Augment catalog entries with column_stats (min/max per numeric column) from analytics.
+    # These are computed at ingest time and are needed so the LLM knows column value ranges
+    # (e.g. PERIOD_YEAR min=2020.0 max=2023.0) without firing an extra probe query.
+    for entry in catalog:
+        ar = analytics_by_file.get(entry["file_id"])
+        entry["column_stats"] = (ar.column_stats or {}) if ar else {}
+
     parquet_blob_path = None
     parquet_paths_all: dict[str, str] = {}
     for meta in all_meta:
