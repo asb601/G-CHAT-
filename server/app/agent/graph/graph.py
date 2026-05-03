@@ -249,6 +249,9 @@ async def _build_agent_context(
         "tool_call_count": 0,
         "request_id": req_id,
         "broaden_nudges": 0,
+        # First turn = no prior conversation context → use gpt-4o
+        # Follow-up turns = context exists → use gpt-4o-mini (falls back to gpt-4o on rate-limit)
+        "is_first_turn": not bool(conversation_context.strip()),
     }
 
     return {

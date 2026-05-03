@@ -16,6 +16,7 @@ from app.api.v1.chat_common import (
     WARN_MESSAGES_THRESHOLD,
     bg_title_and_summary,
 )
+from app.core.database import async_session
 from app.dependencies import get_db, get_current_user
 from app.models.conversation import Conversation, Message
 from app.models.user import User
@@ -125,25 +126,29 @@ async def chat_message_stream(
                 stored_data = full_data[:MAX_STORED_DATA_ROWS]
                 assistant_token_count = count_tokens(answer_text)
 
-                db.add(Message(
-                    conversation_id=conv_id,
-                    role="assistant",
-                    content=answer_text,
-                    token_count=assistant_token_count,
-                    payload={
-                        "data": stored_data,
-                        "data_truncated": len(full_data) > MAX_STORED_DATA_ROWS,
-                        "chart": final_payload.get("chart"),
-                        "row_count": final_payload.get("row_count", 0),
-                        "files_used": final_payload.get("files_used", []),
-                        "tool_calls": final_payload.get("tool_calls", 0),
-                    },
-                ))
-                upd_conv = await db.get(Conversation, conv_id)
-                if upd_conv:
-                    upd_conv.updated_at = datetime.now(timezone.utc)
-                    upd_conv.token_count = (upd_conv.token_count or 0) + assistant_token_count
-                await db.commit()
+                # Use a fresh session — the agent's DB reads (e.g. vector search)
+                # may have left the request session in an aborted-transaction state.
+                # A separate session is always clean and avoids that corruption.
+                async with async_session() as save_db:
+                    save_db.add(Message(
+                        conversation_id=conv_id,
+                        role="assistant",
+                        content=answer_text,
+                        token_count=assistant_token_count,
+                        payload={
+                            "data": stored_data,
+                            "data_truncated": len(full_data) > MAX_STORED_DATA_ROWS,
+                            "chart": final_payload.get("chart"),
+                            "row_count": final_payload.get("row_count", 0),
+                            "files_used": final_payload.get("files_used", []),
+                            "tool_calls": final_payload.get("tool_calls", 0),
+                        },
+                    ))
+                    upd_conv = await save_db.get(Conversation, conv_id)
+                    if upd_conv:
+                        upd_conv.updated_at = datetime.now(timezone.utc)
+                        upd_conv.token_count = (upd_conv.token_count or 0) + assistant_token_count
+                    await save_db.commit()
 
                 final_payload["conversation_id"] = conv_id
 
@@ -160,16 +165,17 @@ async def chat_message_stream(
 
         except Exception:
             try:
-                db.add(Message(
-                    conversation_id=conv_id,
-                    role="assistant",
-                    content="Failed to process query. Please try again.",
-                    token_count=count_tokens("Failed to process query. Please try again."),
-                    payload={"error": True},
-                ))
-                await db.commit()
+                async with async_session() as err_db:
+                    err_db.add(Message(
+                        conversation_id=conv_id,
+                        role="assistant",
+                        content="Failed to process query. Please try again.",
+                        token_count=count_tokens("Failed to process query. Please try again."),
+                        payload={"error": True},
+                    ))
+                    await err_db.commit()
             except Exception:
-                await db.rollback()
+                pass  # best-effort; yield the error event regardless
 
             yield (
                 f"data: {_json.dumps({'event': 'error', 'detail': 'Failed to process query. Please try again.'})}"

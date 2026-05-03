@@ -17,7 +17,8 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
   const [sidebarOpen, setSidebarOpen] = useState(true);
-
+  const noNavRoutes = ["/onboarding"];
+  const hideNav=noNavRoutes.includes(pathname);
   useEffect(() => {
     if (loading) return;
     if (!user) {
@@ -42,6 +43,13 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
     return null;
   }
 
+if (hideNav) {
+  return (
+    <div className="h-screen bg-background">
+      {children}
+    </div>
+  );
+}
   const navItems: NavItem[] = [
     { href: "/chat", icon: MessageSquare, label: "Chat" },
     { href: "/folders", icon: FolderOpen, label: "Folders" },

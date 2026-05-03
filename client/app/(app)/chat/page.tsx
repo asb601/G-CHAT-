@@ -876,7 +876,11 @@ export default function ChatPage() {
               throw new Error(event.detail || "Stream error");
             }
           } catch (parseErr) {
-            if (parseErr instanceof Error && parseErr.message.includes("Stream error")) throw parseErr;
+            // SyntaxError = malformed SSE line (safe to skip).
+            // Anything else was deliberately thrown inside the try block
+            // (e.g. from the server's "error" event) — re-throw it so the
+            // outer catch can show it to the user.
+            if (!(parseErr instanceof SyntaxError)) throw parseErr;
           }
         }
       }

@@ -30,11 +30,7 @@ def get_client() -> tuple[AzureOpenAI, str]:
                 _ai_client = AzureOpenAI(
                     azure_endpoint=endpoint,
                     api_key=api_key,
-                    api_version=(
-                        settings.AZURE_OPENAI_API_VERSION
-                        if hasattr(settings, "AZURE_OPENAI_API_VERSION")
-                        else "2024-02-01"
-                    ),
+                    api_version=settings.AZURE_OPENAI_API_VERSION,
                 )
                 _ai_deployment = deployment
     return _ai_client, _ai_deployment

@@ -30,8 +30,9 @@ def build_sql_tools(
         The file paths and column names are in the system prompt — use them directly.
         Parquet syntax: read_parquet('az://CONTAINER/filename.parquet')
         CSV syntax:     read_csv_auto('az://CONTAINER/filename.csv')
-        Use TRY_CAST for date columns. Results are capped at 1000 rows server-side.
-        Returns row count, column names, 5-row preview, and stores full results."""
+        Use TRY_CAST for date columns. Results are capped at 20 rows server-side.
+        Returns row_count, total_rows, column names, and all result rows (up to 20).
+        If total_rows > 20 the query returned more data — refine with WHERE/LIMIT/GROUP BY."""
         sql_upper = sql.strip().upper()
         for bad in ("DROP ", "DELETE ", "UPDATE ", "INSERT ", "CREATE ", "ALTER ", "TRUNCATE "):
             if bad in sql_upper:
@@ -42,7 +43,7 @@ def build_sql_tools(
 
         t_exec = time.perf_counter()
         try:
-            rows, total = execute_query_sync(sql, connection_string)
+            rows, total = execute_query_sync(sql, connection_string, max_rows=20)
             duration_ms = round((time.perf_counter() - t_exec) * 1000, 2)
 
             # ── Log full result: columns + first 20 rows + timing ──────────────
@@ -63,12 +64,11 @@ def build_sql_tools(
                              duration_ms=duration_ms)
 
             state_store["sql_results"] = rows
-            preview = rows[:5]
             resp: dict = {
                 "row_count": len(rows),
                 "total_rows": total,
                 "columns": list(rows[0].keys()) if rows else [],
-                "preview_rows": preview,
+                "rows": rows,
             }
             if total > len(rows):
                 resp["warning"] = (

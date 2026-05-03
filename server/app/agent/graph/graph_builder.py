@@ -12,7 +12,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 from openai import RateLimitError
 
-from app.agent.llm import get_llm
+from app.agent.llm import get_llm, get_llm_mini
 from app.agent.state import AgentState, MAX_TOOL_CALLS
 from app.core.logger import llm_logger, pipeline_logger
 
@@ -48,7 +48,11 @@ def build_agent_node(all_tools: list):
         if count >= MAX_TOOL_CALLS:
             return {"messages": [AIMessage(content="I've gathered enough data. Let me summarise.")]}
 
-        llm_with_tools = get_llm().bind_tools(all_tools)
+        # Pick model: gpt-4o on turn 1 (intent + file selection matters most),
+        # gpt-4o-mini on follow-up turns (cheaper, still capable for SQL + answers).
+        primary_llm = get_llm()
+        active_llm = primary_llm if state.get("is_first_turn", True) else get_llm_mini()
+        llm_with_tools = active_llm.bind_tools(all_tools)
 
         # ── Log every message going into the LLM this iteration ──────────────
         pipeline_logger.debug(
@@ -67,6 +71,18 @@ def build_agent_node(all_tools: list):
                 break
             except RateLimitError as exc:
                 last_exc = exc
+                # If we were using mini and it's rate-limited, switch immediately
+                # to the primary model instead of waiting and retrying mini.
+                if active_llm is not primary_llm:
+                    llm_logger.warning(
+                        "llm_mini_rate_limited_fallback_to_primary",
+                        attempt=attempt + 1,
+                        error=str(exc)[:200],
+                    )
+                    active_llm = primary_llm
+                    llm_with_tools = primary_llm.bind_tools(all_tools)
+                    # retry immediately on primary — don't sleep
+                    continue
                 if attempt < _MAX_LLM_RETRIES:
                     delay = _RETRY_BASE_DELAY * (2 ** attempt)
                     llm_logger.warning("llm_rate_limited",
@@ -107,7 +123,7 @@ def build_agent_node(all_tools: list):
 
         llm_logger.info("llm_call",
                         function="agent_node",
-                        model=get_llm().deployment_name,
+                        model=active_llm.deployment_name,
                         prompt_tokens=p_tok,
                         completion_tokens=c_tok,
                         total_tokens=p_tok + c_tok,

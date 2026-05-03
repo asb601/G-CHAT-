@@ -21,16 +21,18 @@ class Settings(BaseSettings):
     # Azure OpenAI
     AZURE_OPENAI_ENDPOINT: str = ""
     AZURE_OPENAI_KEY: str = ""
-    AZURE_OPENAI_DEPLOYMENT: str = "gpt-4"
-    # Embedding model deployment name — must be deployed in the same Azure OpenAI resource.
-    # Standard name: text-embedding-3-small  (deploy it once in Azure Portal, paste name here)
-    AZURE_OPENAI_EMBEDDING_DEPLOYMENT: str = "text-embedding-3-small"
+    # Primary deployment — gpt-4o, used on turn 1
+    AZURE_OPENAI_DEPLOYMENT: str = ""
+    # Mini deployment — gpt-4o-mini, used on follow-up turns 2+
+    AZURE_OPENAI_DEPLOYMENT_MINI: str = ""
+    # Embedding model deployment
+    AZURE_OPENAI_EMBEDDING_DEPLOYMENT: str = ""
 
-    # .env aliases (AZURE_OPENAI_API_BASE / AZURE_OPENAI_API_KEY / AZURE_OPENAI_MODEL)
+    # .env aliases (AZURE_OPENAI_API_BASE / AZURE_OPENAI_API_KEY)
     AZURE_OPENAI_API_BASE: str = ""
     AZURE_OPENAI_API_KEY: str = ""
-    AZURE_OPENAI_MODEL: str = ""
-    AZURE_OPENAI_API_VERSION: str = "2024-02-01"
+    AZURE_OPENAI_MODEL: str = ""  # legacy, ignored
+    AZURE_OPENAI_API_VERSION: str = ""
 
     # SMTP (Gmail App Password recommended)
     SMTP_HOST: str = "smtp.gmail.com"

@@ -16,6 +16,7 @@ class AgentState(TypedDict):
     tool_call_count: int
     request_id: str
     broaden_nudges: int  # how many times we've forced a "search wider" retry
+    is_first_turn: bool  # True = turn 1 → gpt-4o; False = follow-up → gpt-4o-mini
 
 
 MAX_TOOL_CALLS = 8
