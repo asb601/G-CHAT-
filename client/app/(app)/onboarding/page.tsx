@@ -2,14 +2,14 @@
 
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { Building2, Clock, CheckCircle2, XCircle, Loader2, Send } from "lucide-react";
+import { Building2, Clock, CheckCircle2, XCircle, Loader2, Send, LogOut } from "lucide-react";
 import { apiFetch } from "@/lib/auth";
 import { useAuth } from "@/components/auth-provider";
 
 type AccessStatus = "loading" | "none" | "pending" | "approved" | "declined";
 
 export default function OnboardingPage() {
-  const { user, loading } = useAuth();
+  const { user, loading, logout } = useAuth();
   const router = useRouter();
 
   const [status, setStatus] = useState<AccessStatus>("loading");
@@ -169,6 +169,19 @@ export default function OnboardingPage() {
             </div>
             <h1 className="text-2xl font-semibold text-foreground">Access Approved</h1>
             <Loader2 className="w-5 h-5 animate-spin text-muted-foreground mx-auto" />
+          </div>
+        )}
+
+        {/* ── Sign out ── */}
+        {status !== "approved" && (
+          <div className="text-center">
+            <button
+              onClick={logout}
+              className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              Sign out
+            </button>
           </div>
         )}
 
