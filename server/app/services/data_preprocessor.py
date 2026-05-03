@@ -2,7 +2,7 @@
 Data preprocessing pipeline — runs BEFORE DuckDB sampling and Parquet conversion.
 
 Handles every supported file type:
-    .csv  .txt  .tsv  .tab  .xlsx  .xls  .xlsm  .xlsb
+    .csv  .txt  .tsv  .tab  .dat  .psv  .pipe  .xlsx  .xls  .xlsm  .xlsb
 
 Resource model (zero-disk for CSV, half-disk for Excel)
 ────────────────────────────────────────────────────────
@@ -25,7 +25,8 @@ Large files (> 50 MB) are streamed 100 000 rows at a time. Small files
 Cleaning stages (per-chunk for large files, once for small)
 ────────────────────────────────────────────────────────────
   1.  Encoding detection   — HTTP range read of first 64 KB only
-  2.  Delimiter detection  — first 8 KB of probe bytes
+  2.  Delimiter detection  — first 8 KB of probe bytes (clevercsv → extended
+       Sniffer → frequency+consistency analysis; any single-char delimiter)
   3.  Header detection     — first 15 rows of probe bytes
   4.  Schema discovery     — first 1 000 rows of probe bytes → per-column type
   5.  Per-chunk streaming:
@@ -79,7 +80,17 @@ BLOCK_SIZE              = 4 * 1024 * 1024  # 4 MB per Azure block blob block
 # ── Supported file-type groups ────────────────────────────────────────────────
 
 EXCEL_EXTS = frozenset({".xlsx", ".xls", ".xlsm", ".xlsb"})
-TEXT_EXTS  = frozenset({".csv", ".txt", ".tsv", ".tab"})
+TEXT_EXTS  = frozenset({
+    # Standard delimited-text formats
+    ".csv", ".tsv", ".tab",
+    # Generic text — any delimiter detected automatically
+    ".txt",
+    # ERP / data-warehouse exports often use these extensions
+    ".dat",   # SAP, Oracle EBS generic data export
+    ".psv",   # pipe-separated values
+    ".pipe",  # pipe-separated (alternate convention)
+    ".dsv",   # delimiter-separated values
+})
 ALL_EXTS   = EXCEL_EXTS | TEXT_EXTS
 
 
@@ -105,7 +116,9 @@ _BOOL_ALL   = _BOOL_TRUE | _BOOL_FALSE
 
 _DATE_NAME_CLUES: frozenset[str] = frozenset({
     "date", "dt", "time", "timestamp", "created", "updated", "modified",
-    "period", "dob", "birth", "expir", "effective", "since", "until",
+    # NOTE: "period" intentionally excluded — ERP period columns (e.g. GL_PERIOD)
+    # contain values like "JAN-25" which are labels, not parseable calendar dates.
+    "dob", "birth", "expir", "effective", "since", "until",
     "_at", "at_", "start", "end", "from", "to", "year", "month", "week",
     "day", "posted", "issued", "received", "shipped", "closed",
 })
@@ -122,7 +135,13 @@ _NUM_NAME_CLUES: frozenset[str] = frozenset({
 _GARBAGE_ROW_RE = re.compile(
     r"^\s*(total|grand\s+total|subtotal|sub\s+total|sum|page\s+total|"
     r"running\s+total|end\s+of\s+report|average|avg|mean|balance\s+forward|"
-    r"carried\s+forward|min|max)\b",
+    r"carried\s+forward|min|max|"
+    # German (SAP, other ERP exports)
+    r"summe|gesamtsumme|gesamt|zwischensumme|durchschnitt|"
+    # French
+    r"total\s+g[e\u00e9]n[e\u00e9]ral|total\s+partiel|moyenne|"
+    # Spanish / Portuguese
+    r"total\s+general|suma\s+total|promedio|m[e\u00e9]dia)\b",
     re.IGNORECASE,
 )
 _SEP_ROW_RE    = re.compile(r"^[-=*_~\s|+]+$")
@@ -652,7 +671,12 @@ def _process_xlsx_to_blob(
     from openpyxl.utils import column_index_from_string  # noqa: PLC0415
 
     wb = openpyxl.load_workbook(raw_path, read_only=True, data_only=True)
-    ws = wb.active
+    # Prefer the sheet with the most populated cells — the active sheet is often
+    # a cover page or instructions tab, not the actual data.
+    _data_sheets   = [s for s in wb.worksheets if (s.max_row or 0) > 0]
+    ws             = max(_data_sheets, key=lambda s: (s.max_row or 0) * (s.max_column or 0)) \
+                     if _data_sheets else wb.active
+    best_sheet_title = ws.title
 
     hidden_col_idx: set[int] = set()
     try:
@@ -708,9 +732,9 @@ def _process_xlsx_to_blob(
     n_cols        = len(headers)
     data_leftover = head_buf[header_row_idx + 1:]
 
-    # Re-open for the full streaming pass
+    # Re-open for the full streaming pass (use the same sheet identified above)
     wb2 = openpyxl.load_workbook(raw_path, read_only=True, data_only=True)
-    ws2 = wb2.active
+    ws2 = wb2[best_sheet_title] if best_sheet_title in wb2.sheetnames else wb2.active
 
     def _iter_data_rows() -> Iterator[list[str]]:
         for r in data_leftover:
@@ -908,12 +932,105 @@ def _detect_encoding(path: str) -> str:
         return _detect_encoding_from_bytes(fh.read(65536))
 
 
+def _is_consistent_delimiter(text: str, delim: str, threshold: float = 0.80) -> bool:
+    """
+    Return True if *delim* produces a consistent column count across lines.
+    >80% of non-empty lines must split into the same number of fields.
+    """
+    lines = [ln for ln in text.splitlines() if ln.strip()][:60]
+    if len(lines) < 2:
+        return True  # single-line files can't be validated; accept
+    counts = [ln.count(delim) for ln in lines]
+    mode_count = max(set(counts), key=counts.count)
+    if mode_count == 0:
+        return False
+    agree = sum(1 for c in counts if c == mode_count)
+    return agree / len(counts) >= threshold
+
+
+def _frequency_delimiter(text: str) -> str | None:
+    """
+    Rank candidate delimiters by (frequency × consistency) and return the best one.
+    Score favours characters that appear often *and* consistently across all lines.
+    Space is given a lower weight because it appears in almost every cell value.
+    """
+    # Ordered roughly by real-world prevalence in data files
+    _CANDIDATES = [",", "\t", "|", ";", ":", "^", "~", "!", " "]
+    lines = [ln for ln in text.splitlines() if ln.strip()][:60]
+    if len(lines) < 2:
+        return None
+
+    best_delim: str | None = None
+    best_score = 0.0
+
+    for delim in _CANDIDATES:
+        counts = [ln.count(delim) for ln in lines]
+        mode_count = max(set(counts), key=counts.count)
+        if mode_count == 0:
+            continue
+        agree = sum(1 for c in counts if c == mode_count) / len(counts)
+        # Space penalised — virtually every line contains spaces that aren't delimiters
+        weight = 0.4 if delim == " " else 1.0
+        score = mode_count * agree * weight
+        if score > best_score and agree >= 0.75 and mode_count >= 1:
+            best_score = score
+            best_delim = delim
+
+    # Space requires extra evidence: at least 3 consistent fields per line
+    if best_delim == " ":
+        counts = [ln.count(" ") for ln in lines]
+        mode_count = max(set(counts), key=counts.count)
+        if mode_count < 2:
+            return None
+
+    return best_delim
+
+
 def _detect_delimiter_from_str(text: str, ext_hint: str = "") -> str:
-    """Detect CSV delimiter from already-decoded text (e.g. probe text in memory)."""
+    """
+    Detect the field delimiter from decoded text using a four-level cascade:
+
+    1. clevercsv.Sniffer  — statistical analysis; handles any single-char delimiter
+       including space, colon, caret, tilde, etc.  (installed via pyproject.toml)
+    2. csv.Sniffer        — extended candidate set beyond the stdlib default
+    3. Frequency + consistency analysis — manual scoring across the first 60 lines
+    4. Extension hint     — last-resort fallback for well-known extension conventions
+
+    The probe sample used is the first 8 KB (sufficient for sniffing without reading
+    the whole file into memory).
+    """
+    sample = text[:8192]
+
+    # ── 1. clevercsv (preferred) ───────────────────────────────────────────────
     try:
-        return csv.Sniffer().sniff(text[:8192], delimiters=",;\t|").delimiter
+        import clevercsv  # noqa: PLC0415
+        dialect = clevercsv.Sniffer().sniff(sample, verbose=False)
+        if dialect is not None:
+            return dialect.delimiter
+    except Exception:
+        pass
+
+    # ── 2. csv.Sniffer with extended candidates ────────────────────────────────
+    _SNIFFER_CANDIDATES = ",\t|;:^~! "
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=_SNIFFER_CANDIDATES)
+        delim = dialect.delimiter
+        if _is_consistent_delimiter(sample, delim):
+            return delim
     except csv.Error:
-        return "\t" if ext_hint.endswith((".tsv", ".tab")) else ","
+        pass
+
+    # ── 3. Frequency + consistency scoring ────────────────────────────────────
+    best = _frequency_delimiter(sample)
+    if best is not None:
+        return best
+
+    # ── 4. Extension hint as absolute last resort ──────────────────────────────
+    if ext_hint.endswith((".tsv", ".tab")):
+        return "\t"
+    if ext_hint.endswith((".psv", ".pipe")):
+        return "|"
+    return ","
 
 
 def _detect_delimiter(path: str, encoding: str) -> str:
@@ -1121,20 +1238,23 @@ def _dedup_column_names(names: list[str]) -> tuple[list[str], dict]:
 
 
 def _drop_garbage_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
-    keep = []
-    for _, row in df.iterrows():
-        non_null = [str(v).strip() for v in row if v is not None and str(v).strip()]
-        if not non_null:
-            keep.append(False)
-            continue
-        first = non_null[0]
-        if all(_SEP_ROW_RE.match(c) for c in non_null):
-            keep.append(False)
-        elif _GARBAGE_ROW_RE.match(first):
-            keep.append(False)
-        else:
-            keep.append(True)
-    mask   = pd.Series(keep, index=df.index)
+    # Vectorised — no Python loop over rows; safe for 100K-row chunks.
+    str_df = df.fillna("").astype(str).apply(lambda s: s.str.strip())
+
+    # 1. All-empty rows
+    all_empty = (str_df == "").all(axis=1)
+
+    # 2. First cell triggers a known garbage / subtotal keyword
+    is_garbage = str_df.iloc[:, 0].str.match(_GARBAGE_ROW_RE, na=False)
+
+    # 3. Separator rows: every non-empty cell consists entirely of separator chars.
+    #    Logic: for each cell, (it is empty) OR (it matches the sep pattern).
+    #    A row qualifies as separator only if it has at least one non-empty cell.
+    non_empty_mask = str_df != ""
+    sep_cell       = str_df.apply(lambda col: col.str.match(_SEP_ROW_RE, na=False))
+    is_sep         = (~non_empty_mask | sep_cell).all(axis=1) & non_empty_mask.any(axis=1)
+
+    mask   = ~(all_empty | is_garbage | is_sep)
     n_drop = int((~mask).sum())
     return df[mask].copy(), n_drop
 
@@ -1230,6 +1350,10 @@ def _parse_one_date(v: object) -> str | None:
     sv = str(v).strip()
     if not sv or sv.lower() in _NULLSTR:
         return None
+    # MON-YY / MON-YYYY are ERP period labels (e.g. "JAN-25", "FEB-2025"),
+    # not parseable calendar dates.  Return None to prevent corruption.
+    if re.match(r'^[A-Za-z]{3}-\d{2,4}$', sv):
+        return None
     try:
         f = float(sv.replace(",", ""))
         if f == int(f):
@@ -1240,8 +1364,13 @@ def _parse_one_date(v: object) -> str | None:
         pass
     try:
         from dateutil import parser as _dp  # noqa: PLC0415
-        parsed = _dp.parse(sv, default=datetime(1900, 1, 1), dayfirst=False)
-        return parsed.strftime("%Y-%m-%d") if 1900 <= parsed.year <= 2100 else None
+        # Require at least one digit: pure text like "January" has none and would
+        # be silently defaulted to 1900-01-01 by dateutil — wrong output.
+        if any(c.isdigit() for c in sv):
+            parsed = _dp.parse(sv, default=datetime(1900, 1, 1), dayfirst=False)
+            # Exclude exactly 1900 — dateutil uses it as its fill-in default,
+            # so a parsed year of 1900 almost always means the input had no year.
+            return parsed.strftime("%Y-%m-%d") if 1901 <= parsed.year <= 2100 else None
     except Exception:
         pass
     for fmt in (

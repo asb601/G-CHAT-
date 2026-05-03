@@ -6,7 +6,6 @@ import {
   AlertCircle,
   RefreshCw,
   ChevronDown,
-  BarChart2,
   Table2,
   Plus,
   MessageSquare,
@@ -59,142 +58,6 @@ interface ConversationSummary {
   created_at: string;
   updated_at: string;
   message_count: number;
-}
-
-// ── Analytics helpers ─────────────────────────────────────────────────────────
-
-interface NumericStat {
-  kind: "numeric";
-  min: number;
-  max: number;
-  mean: number;
-  sum: number;
-  nulls: number;
-}
-
-interface CategoricalStat {
-  kind: "categorical";
-  topValues: { value: string; count: number; pct: number }[];
-  unique: number;
-  nulls: number;
-}
-
-type ColStat = NumericStat | CategoricalStat;
-
-function computeAnalytics(data: Record<string, unknown>[]): Record<string, ColStat> {
-  if (!data.length) return {};
-  const cols = Object.keys(data[0]);
-  const result: Record<string, ColStat> = {};
-
-  for (const col of cols) {
-    const vals = data.map((r) => r[col]);
-    const nulls = vals.filter((v) => v === null || v === undefined || v === "").length;
-    const nonNull = vals.filter((v) => v !== null && v !== undefined && v !== "");
-    const numericVals = nonNull
-      .map((v) => parseFloat(String(v)))
-      .filter((n) => !isNaN(n));
-
-    if (numericVals.length > nonNull.length * 0.7 && numericVals.length > 0) {
-      const sum = numericVals.reduce((a, b) => a + b, 0);
-      result[col] = {
-        kind: "numeric",
-        min: Math.min(...numericVals),
-        max: Math.max(...numericVals),
-        mean: sum / numericVals.length,
-        sum,
-        nulls,
-      };
-    } else {
-      const freq: Record<string, number> = {};
-      for (const v of nonNull) {
-        const k = String(v);
-        freq[k] = (freq[k] || 0) + 1;
-      }
-      const sorted = Object.entries(freq)
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 8);
-      result[col] = {
-        kind: "categorical",
-        topValues: sorted.map(([value, count]) => ({
-          value,
-          count,
-          pct: Math.round((count / data.length) * 100),
-        })),
-        unique: Object.keys(freq).length,
-        nulls,
-      };
-    }
-  }
-  return result;
-}
-
-function fmtNum(n: number): string {
-  if (Math.abs(n) >= 1_000_000) return (n / 1_000_000).toFixed(2) + "M";
-  if (Math.abs(n) >= 1_000) return (n / 1_000).toFixed(1) + "K";
-  return n % 1 === 0 ? String(n) : n.toFixed(2);
-}
-
-// ── Analytics grid ────────────────────────────────────────────────────────────
-
-function AnalyticsGrid({ data }: { data: Record<string, unknown>[] }) {
-  const stats = computeAnalytics(data);
-  const entries = Object.entries(stats);
-  if (!entries.length) return null;
-
-  return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
-      {entries.map(([col, stat]) => (
-        <div key={col} className="bg-surface border border-border rounded-lg p-3">
-          <p className="text-[11px] font-medium text-muted-foreground uppercase tracking-wide mb-2 truncate">
-            {col}
-          </p>
-          {stat.kind === "numeric" ? (
-            <div className="space-y-1.5">
-              <div className="flex justify-between items-baseline">
-                <span className="text-xs text-muted-foreground">Sum</span>
-                <span className="text-sm font-semibold text-foreground">{fmtNum(stat.sum)}</span>
-              </div>
-              <div className="flex justify-between items-baseline">
-                <span className="text-xs text-muted-foreground">Avg</span>
-                <span className="text-xs text-foreground">{fmtNum(stat.mean)}</span>
-              </div>
-              <div className="flex justify-between items-baseline">
-                <span className="text-xs text-muted-foreground">Min / Max</span>
-                <span className="text-xs text-foreground">
-                  {fmtNum(stat.min)} / {fmtNum(stat.max)}
-                </span>
-              </div>
-              {stat.nulls > 0 && (
-                <p className="text-[11px] text-amber-500/80 mt-1">{stat.nulls} nulls</p>
-              )}
-            </div>
-          ) : (
-            <div className="space-y-2">
-              <p className="text-[11px] text-muted-foreground">{stat.unique} unique values</p>
-              {stat.topValues.map(({ value, count, pct }) => (
-                <div key={value} className="space-y-0.5">
-                  <div className="flex justify-between text-[11px]">
-                    <span className="text-foreground truncate max-w-[120px]" title={value}>
-                      {value}
-                    </span>
-                    <span className="text-muted-foreground shrink-0 ml-2">
-                      {count} ({pct}%)
-                    </span>
-                  </div>
-                  <div className="w-full bg-border rounded-full h-1 overflow-hidden">
-                    <div
-                      className="bg-primary h-full rounded-full transition-all"
-                      style={{ width: `${pct}%` }}
-                    />
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      ))}
-    </div>
-  );
 }
 
 // ── Data table ────────────────────────────────────────────────────────────────
@@ -287,8 +150,6 @@ function DataTable({ data }: { data: Record<string, unknown>[] }) {
 
 // ── Results accordion ─────────────────────────────────────────────────────────
 
-type TabId = "table" | "analytics";
-
 function ResultsAccordion({
   payload,
   isOpen,
@@ -298,7 +159,6 @@ function ResultsAccordion({
   isOpen: boolean;
   onToggle: () => void;
 }) {
-  const [tab, setTab] = useState<TabId>("table");
   const hasData = payload.data && payload.data.length > 0;
   if (!hasData) return null;
 
@@ -338,43 +198,8 @@ function ResultsAccordion({
 
       {/* Accordion body */}
       {isOpen && (
-        <div>
-          {/* Tabs */}
-          <div className="flex border-b border-border bg-surface">
-            <button
-              onClick={() => setTab("table")}
-              className={cn(
-                "flex items-center gap-1.5 px-4 py-2 text-xs font-medium border-b-2 -mb-px transition-colors",
-                tab === "table"
-                  ? "border-primary text-primary"
-                  : "border-transparent text-muted-foreground hover:text-foreground"
-              )}
-            >
-              <Table2 className="w-3.5 h-3.5" />
-              Table
-            </button>
-            <button
-              onClick={() => setTab("analytics")}
-              className={cn(
-                "flex items-center gap-1.5 px-4 py-2 text-xs font-medium border-b-2 -mb-px transition-colors",
-                tab === "analytics"
-                  ? "border-primary text-primary"
-                  : "border-transparent text-muted-foreground hover:text-foreground"
-              )}
-            >
-              <BarChart2 className="w-3.5 h-3.5" />
-              Analytics
-            </button>
-          </div>
-
-          {/* Tab content */}
-          <div className="p-3">
-            {tab === "table" ? (
-              <DataTable data={payload.data} />
-            ) : (
-              <AnalyticsGrid data={payload.data} />
-            )}
-          </div>
+        <div className="p-3">
+          <DataTable data={payload.data} />
         </div>
       )}
     </div>

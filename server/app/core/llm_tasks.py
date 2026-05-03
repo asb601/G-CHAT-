@@ -50,7 +50,7 @@ Return ONLY this JSON with no preamble no markdown:
 }}
 
 Columns: {json.dumps(cols_for_prompt, default=str)}
-Sample rows: {json.dumps(sample_rows[:3], default=str)}"""
+Sample rows: {json.dumps(sample_rows[:20], default=str)}"""
 
         prompt_tokens = count_tokens(prompt, deployment)
 
