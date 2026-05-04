@@ -91,7 +91,7 @@ When you finish, write a complete, analyst-quality response. Structure it as fol
 
 3. **Source** — one short line stating which file(s) the data came from and what filter was applied. For conceptual answers, cite the file descriptions you used.
 
-Do NOT include a markdown table in your response. The UI renders the SQL results as an interactive table automatically — writing one here creates a duplicate. Only write text: a direct sentence, insights, and source.
+Do NOT include any tabular data in your response — no markdown pipe tables (| col | col |), no tab-separated values, no CSV rows. The UI renders the full SQL results as an interactive table separately. Writing data rows here creates a duplicate and will be stripped. Write only prose: a direct answer sentence, insight bullets, and a source line.
 
 Only state numeric totals or aggregates that are explicitly present as columns in the SQL result rows. Do not compute numbers not in the result.
 

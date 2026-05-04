@@ -308,6 +308,21 @@ function ResultsAccordion({
 
 // ── Answer text (full markdown) ───────────────────────────────────────────────
 
+/** Strip any tabular data lines from LLM text when the UI renders the table separately. */
+function stripTabularContent(text: string): string {
+  const lines = text.split('\n');
+  const out: string[] = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    // Markdown pipe table rows  (| col | col |)
+    if (trimmed.startsWith('|')) continue;
+    // Tab-separated data rows (2+ tab characters = raw tabular dump)
+    if ((line.match(/\t/g) ?? []).length >= 2) continue;
+    out.push(line);
+  }
+  return out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
 function AnswerText({ text }: { text: string }) {
   return (
     <div className="prose prose-sm dark:prose-invert max-w-none prose-p:my-1 prose-li:my-0.5 prose-headings:mt-3 prose-headings:mb-1 prose-hr:my-2 prose-pre:bg-surface-raised prose-pre:border prose-pre:border-border prose-code:text-primary prose-code:before:content-none prose-code:after:content-none prose-table:text-xs prose-th:px-2 prose-th:py-1 prose-td:px-2 prose-td:py-1">
@@ -327,6 +342,10 @@ function AssistantMessage({
   isExpanded: boolean;
   onToggle: () => void;
 }) {
+  const hasData = !!(msg.payload?.data && msg.payload.data.length > 0);
+  // Strip any tabular content from text when the accordion renders the table
+  const displayText = hasData ? stripTabularContent(msg.content) : msg.content;
+
   return (
     <div className="bg-surface border border-border rounded-xl px-4 py-3 w-full min-w-0">
       {msg.error ? (
@@ -336,7 +355,7 @@ function AssistantMessage({
         </span>
       ) : (
         <>
-          <AnswerText text={msg.content} />
+          <AnswerText text={displayText} />
           {msg.payload?.suggested_rephrase && (
             <p className="mt-2 text-xs text-muted-foreground italic border-t border-border pt-2">
               Try: &ldquo;{msg.payload.suggested_rephrase}&rdquo;
