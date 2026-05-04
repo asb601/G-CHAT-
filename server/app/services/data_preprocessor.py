@@ -1268,6 +1268,47 @@ def _drop_garbage_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
 ConverterFn = Callable[[object], object]
 
 
+# ── Identifier-column guards ──────────────────────────────────────────────────
+# Columns whose names match these patterns are PURE identifiers (Oracle EBS,
+# SAP, generic ERP). They must be passed through as-is — never coerced to
+# date or even normalized as numeric — because:
+#   - LEDGER_ID values like 2028, 2030 look like years to date detectors
+#     and got stored as 2028-01-01T00:00:00 (real bug we hit)
+#   - INVOICE_NUM with leading zeros ("00012345") would lose them via numeric
+#     normalization
+#   - Any *_KEY / *_CODE may contain mixed alphanumeric IDs
+# Guard runs BEFORE date / numeric detection and forces the column to be
+# left untouched (no converter installed).
+_ID_COL_SUFFIXES: tuple[str, ...] = (
+    "_id", "_num", "_number", "_no", "_key", "_code", "_ref", "_uuid",
+)
+_ID_COL_PREFIXES: tuple[str, ...] = (
+    "ledger_", "code_combination", "voucher", "invoice_num", "invoice_no",
+    "journal_", "transaction_id", "doc_num", "document_num",
+)
+_ID_COL_EXACT: frozenset[str] = frozenset({
+    "id", "uuid", "guid", "sku", "isin", "cusip", "ein", "ssn",
+    "ledger_id", "org_id", "set_of_books_id", "period_name",
+})
+
+
+def _is_identifier_column(col_name: str) -> bool:
+    """True if the column name strongly indicates a pure identifier.
+
+    Identifier columns are passed through verbatim (no date / numeric coercion).
+    """
+    n = col_name.strip().lower()
+    if not n:
+        return False
+    if n in _ID_COL_EXACT:
+        return True
+    if any(n.endswith(suf) for suf in _ID_COL_SUFFIXES):
+        return True
+    if any(n.startswith(pre) for pre in _ID_COL_PREFIXES):
+        return True
+    return False
+
+
 def _build_converters(
     sample: pd.DataFrame, headers: list[str], warns: list[str],
 ) -> dict[str, ConverterFn]:
@@ -1280,6 +1321,14 @@ def _build_converters(
     for col in headers:
         if col not in sample.columns:
             continue
+
+        # ── Identifier columns: NEVER coerce. Preserve raw value as string. ──
+        # This prevents LEDGER_ID=2028 from becoming "2028-01-01T00:00:00",
+        # INVOICE_NUM=00012345 from losing its leading zeros, etc.
+        if _is_identifier_column(col):
+            warns.append(f"Column '{col}': preserved as identifier (no type coercion)")
+            continue
+
         series    = sample[col].dropna()
         col_lower = col.lower()
         if series.empty:

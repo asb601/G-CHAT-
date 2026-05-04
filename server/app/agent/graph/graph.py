@@ -45,35 +45,16 @@ _stores_lock = threading.Lock()
 
 _NO_FILES_MSG = "No files have been ingested yet. Please upload and ingest some files first."
 
-_POLISH_SYSTEM = (
-    "You are a senior business analyst editing a data report for a client presentation. "
-    "Improve the response below to be more engaging and insightful for a business audience.\n\n"
-    "Rules:\n"
-    "- Keep ALL numbers, markdown table content, and the Source line EXACTLY as-is — never alter a single figure or table cell\n"
-    "- Rewrite the opening sentence to be specific (reference what was found, not generic 'here are the results')\n"
-    "- Expand each Key insights bullet to 1-2 actionable sentences that tell the business story\n"
-    "- Do not add new sections, headings, or footers\n"
-    "- Avoid filler: 'it is worth noting', 'it is important to', 'as we can see', 'it should be noted'\n"
-    "- Write as a trusted CFO-level analyst — concise, direct, and confident"
-)
-
-
 async def _polish_answer(raw: str) -> str:
-    """Run gpt-4o-mini to warm up the analyst answer for client presentation."""
-    if len(raw.strip()) < 120:
-        return raw  # too short / error message — don't touch
-    from langchain_core.messages import HumanMessage as _HMsg, SystemMessage as _SMsg  # noqa: PLC0415
-    try:
-        resp = await get_llm_mini().ainvoke([_SMsg(content=_POLISH_SYSTEM), _HMsg(content=raw)])
-        polished = resp.content if isinstance(resp.content, str) else str(resp.content)
-        return polished.strip() or raw
-    except Exception:
-        return raw  # always fall back to original on any error
+    """Polish pass DISABLED — it added a full LLM round-trip (~1500 tokens)
+    for cosmetic rewriting with marginal value. Returns raw unchanged.
+    Kept as a no-op so callers don't break."""
+    return raw
 
 # How many files to surface in the prompt shortlist.
-# 8 was too tight for queries that need both a metric file and a lookup file.
-# 12 still fits comfortably in the prompt window for very large catalogs.
-_SHORTLIST_TOP_K = 12
+# Reduced from 12 → 7 to cut ~2K tokens of fat per turn. The remaining files
+# stay reachable via search_catalog when the agent decides it needs them.
+_SHORTLIST_TOP_K = 7
 
 # How many slots in the shortlist to reserve for "lookup / master" files —
 # generic dimension tables (parties, accounts, masters, dim_*) that almost

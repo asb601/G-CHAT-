@@ -21,8 +21,9 @@ from app.models.conversation import Conversation, Message
 
 # ── Constants ──
 
-CONTEXT_TOKEN_BUDGET = 3000  # max tokens allocated to conversation history
-RECENT_MESSAGE_COUNT = 10    # prefer last N messages verbatim
+CONTEXT_TOKEN_BUDGET = 1500  # max tokens for conversation history (halved from 3000 to cut bloat)
+RECENT_MESSAGE_COUNT = 6     # last N messages verbatim (down from 10)
+PER_MESSAGE_TOKEN_CAP = 200  # cap any single prior message at this many tokens
 SUMMARY_REGEN_INTERVAL = 10  # regenerate summary every N messages
 TITLE_MODEL_MAX_TOKENS = 60  # cheap call for title generation
 SUMMARY_MODEL_MAX_TOKENS = 300
@@ -46,6 +47,34 @@ def count_tokens(text: str) -> int:
     if not text:
         return 0
     return len(_get_encoder().encode(text))
+
+
+def _trim_history_message(content: str, role: str) -> str:
+    """Compress a prior message before re-sending to the LLM.
+
+    - Drop markdown pipe-table rows (LLM already saw them once; UI re-renders).
+    - Drop tab-separated rows (TSV blocks).
+    - Cap to PER_MESSAGE_TOKEN_CAP tokens.
+    Applied to both user and assistant messages.
+    """
+    if not content:
+        return ""
+    lines = []
+    for ln in content.splitlines():
+        s = ln.strip()
+        if s.startswith("|") and s.endswith("|"):
+            continue
+        if s.count("\t") >= 2:
+            continue
+        lines.append(ln)
+    trimmed = "\n".join(lines).strip()
+    if not trimmed:
+        return "[prior tabular response — omitted]"
+    enc = _get_encoder()
+    toks = enc.encode(trimmed)
+    if len(toks) > PER_MESSAGE_TOKEN_CAP:
+        trimmed = enc.decode(toks[:PER_MESSAGE_TOKEN_CAP]) + " …[truncated]"
+    return trimmed
 
 
 # ── Context building ──
@@ -91,8 +120,11 @@ async def build_conversation_context(
     msg_parts: list[str] = []
     for msg in recent:
         role_label = "User" if msg.role == "user" else "Assistant"
-        msg_text = f"{role_label}: {msg.content}"
-        msg_tokens = msg.token_count if msg.token_count else count_tokens(msg_text)
+        # Strip data tables / TSV / long bullet lists from prior assistant messages —
+        # the data is stored separately and re-sending wastes tokens. Keep prose only.
+        body = _trim_history_message(msg.content, msg.role)
+        msg_text = f"{role_label}: {body}"
+        msg_tokens = count_tokens(msg_text)
 
         if tokens_used + msg_tokens > CONTEXT_TOKEN_BUDGET:
             break
