@@ -334,6 +334,8 @@ function UsersTab({ currentUserId }: { currentUserId: string }) {
   );
   const [togglingId, setTogglingId] = useState<string | null>(null);
   const [reviewingId, setReviewingId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   const handleToggleAdmin = useCallback(
     async (userId: string) => {
@@ -368,6 +370,20 @@ function UsersTab({ currentUserId }: { currentUserId: string }) {
       }
     },
     [mutate, mutateRequests]
+  );
+
+  const handleDeleteUser = useCallback(
+    async (userId: string) => {
+      setDeletingId(userId);
+      try {
+        const res = await apiFetch(`/api/users/${userId}`, { method: "DELETE" });
+        if (res.ok) mutate();
+      } finally {
+        setDeletingId(null);
+        setConfirmDeleteId(null);
+      }
+    },
+    [mutate]
   );
 
   if (!users) {
@@ -528,6 +544,35 @@ function UsersTab({ currentUserId }: { currentUserId: string }) {
                     <Shield className="w-4 h-4" />
                   )}
                 </button>
+              )}
+
+              {!isCurrent && (
+                confirmDeleteId === u.id ? (
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[11px] text-destructive font-medium">Delete?</span>
+                    <button
+                      onClick={() => handleDeleteUser(u.id)}
+                      disabled={deletingId === u.id}
+                      className="px-2 py-0.5 text-[11px] rounded bg-destructive text-white hover:bg-destructive/80 transition-colors disabled:opacity-50"
+                    >
+                      {deletingId === u.id ? <Loader2 className="w-3 h-3 animate-spin" /> : "Yes"}
+                    </button>
+                    <button
+                      onClick={() => setConfirmDeleteId(null)}
+                      className="px-2 py-0.5 text-[11px] rounded bg-surface-raised text-muted-foreground hover:text-foreground transition-colors"
+                    >
+                      No
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => setConfirmDeleteId(u.id)}
+                    title="Delete user"
+                    className="p-1.5 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                )
               )}
             </div>
           </div>

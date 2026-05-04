@@ -103,3 +103,24 @@ async def toggle_admin(
 
     auth_logger.info("admin_toggled", user_id=user_id, is_admin=user.is_admin)
     return {"id": user.id, "is_admin": user.is_admin}
+
+
+@router.delete("/{user_id}")
+async def delete_user(
+    user_id: str,
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Permanently delete a user account. Admins cannot delete themselves."""
+    if user_id == current_user.id:
+        raise HTTPException(status_code=400, detail="Cannot delete your own account")
+
+    user = await db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    await db.delete(user)
+    await db.commit()
+
+    auth_logger.info("user_deleted", deleted_user_id=user_id, by_admin=current_user.id)
+    return {"deleted": True}
