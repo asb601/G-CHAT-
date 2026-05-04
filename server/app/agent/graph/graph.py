@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.catalog_cache import invalidate_catalog_cache, load_catalog  # re-export
 from app.agent.graph.graph_builder import build_graph
+from app.agent.llm import get_llm_mini
 from app.agent.prompts.prompt_builder import build_system_prompt
 from app.agent.search_normalization import tokenize_search_query
 from app.retrieval.orchestrator import retrieve_with_scores
@@ -43,6 +44,31 @@ _request_stores: dict[str, dict] = {}
 _stores_lock = threading.Lock()
 
 _NO_FILES_MSG = "No files have been ingested yet. Please upload and ingest some files first."
+
+_POLISH_SYSTEM = (
+    "You are a senior business analyst editing a data report for a client presentation. "
+    "Improve the response below to be more engaging and insightful for a business audience.\n\n"
+    "Rules:\n"
+    "- Keep ALL numbers, markdown table content, and the Source line EXACTLY as-is — never alter a single figure or table cell\n"
+    "- Rewrite the opening sentence to be specific (reference what was found, not generic 'here are the results')\n"
+    "- Expand each Key insights bullet to 1-2 actionable sentences that tell the business story\n"
+    "- Do not add new sections, headings, or footers\n"
+    "- Avoid filler: 'it is worth noting', 'it is important to', 'as we can see', 'it should be noted'\n"
+    "- Write as a trusted CFO-level analyst — concise, direct, and confident"
+)
+
+
+async def _polish_answer(raw: str) -> str:
+    """Run gpt-4o-mini to warm up the analyst answer for client presentation."""
+    if len(raw.strip()) < 120:
+        return raw  # too short / error message — don't touch
+    from langchain_core.messages import HumanMessage as _HMsg, SystemMessage as _SMsg  # noqa: PLC0415
+    try:
+        resp = await get_llm_mini().ainvoke([_SMsg(content=_POLISH_SYSTEM), _HMsg(content=raw)])
+        polished = resp.content if isinstance(resp.content, str) else str(resp.content)
+        return polished.strip() or raw
+    except Exception:
+        return raw  # always fall back to original on any error
 
 # How many files to surface in the prompt shortlist.
 # 8 was too tight for queries that need both a metric file and a lookup file.
@@ -249,9 +275,9 @@ async def _build_agent_context(
         "tool_call_count": 0,
         "request_id": req_id,
         "broaden_nudges": 0,
-        # First turn = no prior conversation context → use gpt-4o
-        # Follow-up turns = context exists → use gpt-4o-mini (falls back to gpt-4o on rate-limit)
-        "is_first_turn": not bool(conversation_context.strip()),
+        # Always use gpt-4o for all SQL generation turns — mini is used only
+        # for the final polish pass after the answer is fully assembled.
+        "is_first_turn": True,
     }
 
     return {
@@ -338,14 +364,18 @@ async def run_agent_query(
     elif not answer and not sql_results:
         answer = fallback_answer(final_msgs)
 
+    # Polish pass — gpt-4o-mini makes the answer warmer and more client-friendly
+    answer = await _polish_answer(answer)
+
     chart = infer_chart(answer, sql_results)
+    sql_total_rows = store.get("sql_total_rows", len(sql_results))
 
     return {
         "answer": answer,
         "data": sql_results,
         "chart": chart,
         "route": "agent",
-        "row_count": len(sql_results),
+        "row_count": sql_total_rows,
         "files_used": list({
             blob
             for msg in final_msgs
@@ -522,7 +552,11 @@ async def run_agent_query_stream(
     elif not final_answer and not sql_results:
         final_answer = fallback_answer_from_outputs(tool_outputs)
 
+    # Polish pass — gpt-4o-mini makes the answer warmer and more client-friendly
+    final_answer = await _polish_answer(final_answer)
+
     chart = infer_chart(final_answer, sql_results)
+    sql_total_rows = store.get("sql_total_rows", len(sql_results))
 
     yield {
         "type": "done",
@@ -531,7 +565,7 @@ async def run_agent_query_stream(
             "data": sql_results,
             "chart": chart,
             "route": "agent",
-            "row_count": len(sql_results),
+            "row_count": sql_total_rows,
             "files_used": list(files_used),
             "tool_calls": tool_calls_made,
             "retrieved_files": ctx["catalog_len"],

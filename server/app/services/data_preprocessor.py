@@ -118,8 +118,10 @@ _DATE_NAME_CLUES: frozenset[str] = frozenset({
     "date", "dt", "time", "timestamp", "created", "updated", "modified",
     # NOTE: "period" intentionally excluded — ERP period columns (e.g. GL_PERIOD)
     # contain values like "JAN-25" which are labels, not parseable calendar dates.
+    # NOTE: "year" and "month" intentionally excluded — PERIOD_YEAR, PERIOD_MONTH,
+    # FISCAL_YEAR are numeric metric columns (2021, 2022 ...) not calendar dates.
     "dob", "birth", "expir", "effective", "since", "until",
-    "_at", "at_", "start", "end", "from", "to", "year", "month", "week",
+    "_at", "at_", "start", "end", "from", "to", "week",
     "day", "posted", "issued", "received", "shipped", "closed",
 })
 _NUM_NAME_CLUES: frozenset[str] = frozenset({
@@ -1353,6 +1355,11 @@ def _parse_one_date(v: object) -> str | None:
     # MON-YY / MON-YYYY are ERP period labels (e.g. "JAN-25", "FEB-2025"),
     # not parseable calendar dates.  Return None to prevent corruption.
     if re.match(r'^[A-Za-z]{3}-\d{2,4}$', sv):
+        return None
+    # Plain 4-digit year integers (1900-2100) have no month/day context.
+    # dateutil would silently default them to Jan 1 — almost always wrong
+    # for ERP columns like PERIOD_YEAR, LEDGER_ID, FISCAL_YEAR.
+    if re.match(r'^\d{4}$', sv):
         return None
     try:
         f = float(sv.replace(",", ""))

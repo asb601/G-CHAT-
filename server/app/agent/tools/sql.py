@@ -64,6 +64,7 @@ def build_sql_tools(
                              duration_ms=duration_ms)
 
             state_store["sql_results"] = rows
+            state_store["sql_total_rows"] = total
             resp: dict = {
                 "row_count": len(rows),
                 "total_rows": total,

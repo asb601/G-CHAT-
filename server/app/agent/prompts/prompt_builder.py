@@ -59,7 +59,9 @@ For any question involving a year, fiscal year, quarter, period, or date range:
      - samples are '2021'  →  WHERE col = '2021'
      - samples are 2021    →  WHERE col = 2021
      - samples are full dates (2021-04-01)  →  WHERE EXTRACT(YEAR FROM col) = 2021
+     - samples are Oracle strings like '19-MAR-2018' (DD-MON-YYYY, dtype str)  →  see Oracle/ERP date strings in DuckDB SYNTAX below — use strptime or LIKE, NOT EXTRACT or TRY_CAST
   3. If the query still returns 0 rows: run SELECT MIN(col), MAX(col), COUNT(*) to find the actual range, then IMMEDIATELY re-run the original query using a year that exists in the data. Never stop after reporting the range — always follow up with the corrected query in the same response.
+     EXCEPTION: if the date column is dtype str, MIN/MAX returns alphabetical order, not date order. In that case, run SELECT col FROM <file> LIMIT 10 to see actual sample values and determine the string format, then use the matching pattern from DuckDB SYNTAX.
 
 --- QUESTION TYPE ROUTING ---
 
@@ -129,6 +131,14 @@ If a run_sql returns 0 rows for an entity-name lookup (LIKE / equality on a name
 - Year from a full date column: EXTRACT(YEAR FROM date_col) = 2021
 - Safe year cast (handles int/float/string): PERIOD_YEAR::INTEGER = 2021
 - Date range filter: date_col BETWEEN DATE '2021-01-01' AND DATE '2021-12-31'
+
+Oracle/ERP date strings (str column, samples like '19-MAR-2018', '21-AUG-2022' — format DD-MON-YYYY):
+- NEVER use EXTRACT(...), TRY_CAST(... AS DATE), or BETWEEN DATE '...' directly on these columns — they will always error or return 0 rows.
+- For a full date range: WHERE strptime(col, '%d-%b-%Y') BETWEEN '2025-01-01'::DATE AND '2025-01-31'::DATE
+- For a specific month+year: WHERE col LIKE '%-JAN-2025'  (fast string filter, no cast needed)
+- For year only: WHERE col LIKE '%-2025' OR col LIKE '%-2024'  — but prefer strptime for accuracy
+- For aging (days since date): datediff('day', strptime(col, '%d-%b-%Y'), current_date)
+- MIN/MAX probe on a str date column returns alphabetical order, NOT chronological. Instead probe: SELECT col FROM file LIMIT 20 to see actual sample values, then derive the pattern.
 
 Max {max_calls} tool calls total.
 """

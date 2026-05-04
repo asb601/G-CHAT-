@@ -37,6 +37,7 @@ interface AssistantPayload {
   data: Record<string, unknown>[];
   chart: ChartMeta | null;
   row_count?: number;
+  total_rows?: number;
   suggested_rephrase?: string | null;
   tool_calls?: number;
   files_used?: string[];
@@ -62,6 +63,35 @@ interface ConversationSummary {
 
 // ── Data table ────────────────────────────────────────────────────────────────
 
+// ── CSV download helper ───────────────────────────────────────────────────────
+
+function downloadCsv(data: Record<string, unknown>[], filename = "query_result.csv") {
+  if (!data.length) return;
+  const cols = Object.keys(data[0]);
+  const escape = (v: unknown) => {
+    const s = v === null || v === undefined ? "" : String(v);
+    return s.includes(",") || s.includes('"') || s.includes("\n")
+      ? `"${s.replace(/"/g, '""')}"`
+      : s;
+  };
+  const csv = [cols.join(","), ...data.map((r) => cols.map((c) => escape(r[c])).join(","))].join("\n");
+  const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function blobToLabel(blob: string): string {
+  // "dba1285e_AP_INVOICES_ALL.parquet" → "AP Invoices All"
+  const base = blob.replace(/\.[^.]+$/, "").replace(/^[0-9a-f]{8}_/, "").replace(/\.sample$/, "");
+  return base
+    .split("_")
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+    .join(" ");
+}
+
 function formatCell(value: unknown): string {
   if (value === null || value === undefined) return "—";
   const s = String(value);
@@ -84,7 +114,13 @@ function formatCell(value: unknown): string {
   return s;
 }
 
-function DataTable({ data }: { data: Record<string, unknown>[] }) {
+function DataTable({
+  data,
+  totalRows,
+}: {
+  data: Record<string, unknown>[];
+  totalRows?: number;
+}) {
   if (!data.length)
     return (
       <p className="text-xs text-muted-foreground py-6 text-center">No rows returned.</p>
@@ -92,6 +128,8 @@ function DataTable({ data }: { data: Record<string, unknown>[] }) {
 
   const cols = Object.keys(data[0]);
   const rows = data.slice(0, 100);
+  const displayCount = rows.length;
+  const actualTotal = totalRows ?? data.length;
 
   return (
     <div className="overflow-x-auto rounded-md border border-border text-xs">
@@ -139,10 +177,63 @@ function DataTable({ data }: { data: Record<string, unknown>[] }) {
           ))}
         </tbody>
       </table>
-      {data.length > 100 && (
+      {actualTotal > displayCount && (
         <p className="px-3 py-2 text-xs text-muted-foreground border-t border-border bg-surface-raised text-center">
-          Showing 100 of {data.length.toLocaleString()} rows
+          Showing {displayCount.toLocaleString()} of {actualTotal.toLocaleString()} total rows
         </p>
+      )}
+    </div>
+  );
+}
+
+// ── Download panel ────────────────────────────────────────────────────────────
+
+function DownloadPanel({
+  data,
+  filesUsed,
+}: {
+  data: Record<string, unknown>[];
+  filesUsed: string[];
+}) {
+  const [open, setOpen] = useState(false);
+  const sources = filesUsed.map(blobToLabel);
+  const filename =
+    sources.length === 1
+      ? `${sources[0].replace(/ /g, "_").toLowerCase()}.csv`
+      : "query_result.csv";
+
+  return (
+    <div className="relative">
+      <div className="flex items-center gap-1">
+        <button
+          onClick={() => downloadCsv(data, filename)}
+          className="flex items-center gap-1.5 text-[11px] font-medium text-primary hover:text-primary/80 transition-colors px-2 py-1 rounded-md hover:bg-primary/8 border border-primary/20"
+        >
+          <svg className="w-3 h-3" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8">
+            <path d="M8 2v8m0 0L5 7m3 3 3-3M2 12h12" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+          Download CSV
+        </button>
+        {filesUsed.length > 1 && (
+          <button
+            onClick={() => setOpen((v) => !v)}
+            className="flex items-center gap-0.5 text-[11px] text-muted-foreground hover:text-foreground px-1.5 py-1 rounded-md hover:bg-surface-raised transition-colors"
+          >
+            {filesUsed.length} sources
+            <ChevronDown className={cn("w-3 h-3 transition-transform", open && "rotate-180")} />
+          </button>
+        )}
+      </div>
+      {open && filesUsed.length > 1 && (
+        <div className="absolute left-0 top-full mt-1.5 bg-surface border border-border rounded-lg p-2.5 shadow-lg z-20 min-w-52">
+          <p className="text-[10px] uppercase tracking-wide text-muted-foreground mb-1.5 font-semibold">Source files</p>
+          {sources.map((name, i) => (
+            <p key={i} className="text-xs text-foreground py-0.5 flex items-center gap-1.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-primary/50 shrink-0" />
+              {name}
+            </p>
+          ))}
+        </div>
       )}
     </div>
   );
@@ -162,7 +253,8 @@ function ResultsAccordion({
   const hasData = payload.data && payload.data.length > 0;
   if (!hasData) return null;
 
-  const rowCount = payload.row_count ?? payload.data.length;
+  const totalRows = payload.row_count ?? payload.data.length;
+  const displayedRows = payload.data.length;
 
   return (
     <div className="mt-3 border border-border rounded-lg overflow-hidden">
@@ -175,16 +267,16 @@ function ResultsAccordion({
           <Table2 className="w-3.5 h-3.5 text-muted-foreground" />
           <span className="text-xs font-medium text-foreground">Results</span>
           <span className="bg-primary/10 text-primary text-[11px] font-mono rounded px-1.5 py-0.5">
-            {rowCount} row{rowCount !== 1 ? "s" : ""}
+            {totalRows.toLocaleString()} row{totalRows !== 1 ? "s" : ""}
           </span>
-          {payload.files_used && payload.files_used.length > 0 && (
-            <span className="text-[11px] text-muted-foreground hidden sm:inline">
-              · {payload.files_used.length} file{payload.files_used.length !== 1 ? "s" : ""}
+          {totalRows > displayedRows && (
+            <span className="text-[11px] text-muted-foreground">
+              · showing {displayedRows}
             </span>
           )}
-          {payload.retrieved_files != null && payload.total_files != null && payload.total_files > 0 && (
+          {payload.files_used && payload.files_used.length > 0 && (
             <span className="text-[11px] text-muted-foreground hidden sm:inline">
-              · {payload.retrieved_files}/{payload.total_files} searched
+              · {payload.files_used.map(blobToLabel).join(", ")}
             </span>
           )}
         </div>
@@ -198,8 +290,16 @@ function ResultsAccordion({
 
       {/* Accordion body */}
       {isOpen && (
-        <div className="p-3">
-          <DataTable data={payload.data} />
+        <div className="p-3 space-y-3">
+          <div className="flex items-center justify-between">
+            <p className="text-[11px] text-muted-foreground">
+              Displaying {displayedRows.toLocaleString()} of {totalRows.toLocaleString()} total rows
+            </p>
+            {payload.files_used && payload.files_used.length > 0 && (
+              <DownloadPanel data={payload.data} filesUsed={payload.files_used} />
+            )}
+          </div>
+          <DataTable data={payload.data} totalRows={totalRows} />
         </div>
       )}
     </div>
