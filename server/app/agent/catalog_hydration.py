@@ -37,24 +37,36 @@ async def hydrate_files(
     if not file_ids:
         return {}
 
-    meta_rows = list(
-        (
-            await db.execute(
-                select(FileMetadata).where(FileMetadata.file_id.in_(file_ids))
+    from app.core.logger import chat_logger  # local import to avoid circular
+    try:
+        meta_rows = list(
+            (
+                await db.execute(
+                    select(FileMetadata).where(FileMetadata.file_id.in_(file_ids))
+                )
             )
+            .scalars()
+            .all()
         )
-        .scalars()
-        .all()
-    )
-    analytics_rows = list(
-        (
-            await db.execute(
-                select(FileAnalytics).where(FileAnalytics.file_id.in_(file_ids))
+        analytics_rows = list(
+            (
+                await db.execute(
+                    select(FileAnalytics).where(FileAnalytics.file_id.in_(file_ids))
+                )
             )
+            .scalars()
+            .all()
         )
-        .scalars()
-        .all()
-    )
+    except Exception as exc:
+        # DB hiccup — agent still runs on lean catalog entries. Tools like
+        # get_file_schema and inspect_column can fetch column data on demand.
+        chat_logger.warning(
+            "hydrate_files_db_error",
+            error=str(exc)[:300],
+            file_count=len(file_ids),
+        )
+        return {}
+
     stats_by_file = {row.file_id: (row.column_stats or {}) for row in analytics_rows}
 
     return {

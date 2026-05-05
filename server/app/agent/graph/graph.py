@@ -136,11 +136,15 @@ async def _build_agent_context(
         search_text = build_search_text(e).lower()
         score = sum(1 for w in q_words if w in search_text)
 
-        column_text = " ".join(
-            c.get("name", "")
-            for c in (e.get("columns_info") or [])
-            if isinstance(c, dict)
-        ).lower()
+        # Accept both heavy (columns_info: list of dicts) and lean
+        # (column_names: list of strings) catalog shapes.
+        col_names: list[str] = []
+        for c in (e.get("columns_info") or []):
+            if isinstance(c, dict) and c.get("name"):
+                col_names.append(c["name"])
+        if not col_names:
+            col_names = [c for c in (e.get("column_names") or []) if isinstance(c, str)]
+        column_text = " ".join(col_names).lower()
         score += sum(2 for w in q_words if w in column_text)
 
         blob_path = (e.get("blob_path") or "").lower()
@@ -319,7 +323,14 @@ async def run_agent_query(
     """
     pipeline_start = time.perf_counter()
 
-    ctx = await _build_agent_context(query, db, conversation_context, user_id, is_admin, allowed_domains)
+    try:
+        ctx = await _build_agent_context(query, db, conversation_context, user_id, is_admin, allowed_domains)
+    except Exception as exc:
+        chat_logger.exception("agent_context_error", error=str(exc)[:400], query=query[:200])
+        return {
+            "answer": "An error occurred while preparing your query. Please try again.",
+            "data": [], "chart": None,
+        }
     if not ctx:
         return {"answer": _NO_FILES_MSG, "data": [], "chart": None}
 
@@ -418,7 +429,19 @@ async def run_agent_query_stream(
     """
     pipeline_start = time.perf_counter()
 
-    ctx = await _build_agent_context(query, db, conversation_context, user_id, is_admin, allowed_domains)
+    try:
+        ctx = await _build_agent_context(query, db, conversation_context, user_id, is_admin, allowed_domains)
+    except Exception as exc:
+        chat_logger.exception("agent_context_error", error=str(exc)[:400], query=query[:200])
+        yield {
+            "type": "done",
+            "payload": {
+                "answer": "An error occurred while preparing your query. Please try again.",
+                "data": [], "chart": None, "route": "agent", "row_count": 0,
+                "files_used": [], "tool_calls": 0,
+            },
+        }
+        return
     if not ctx:
         yield {
             "type": "done",
