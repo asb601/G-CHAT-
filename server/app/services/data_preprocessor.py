@@ -70,9 +70,6 @@ CHUNK_ROWS              = 100_000       # rows per streaming chunk
 SMALL_FILE_THRESHOLD_MB = 50            # files under this get full-load + dedup
 HEADER_SCAN_ROWS        = 15            # max rows to scan for the real header
 TYPE_DETECT_SAMPLE_ROWS = 1_000         # rows used for column-type detection
-DATE_CONVERT_THRESHOLD  = 0.55          # fraction that must parse as date
-NUM_CONVERT_THRESHOLD   = 0.75          # fraction that must parse as numeric
-NUM_HINT_THRESHOLD      = 0.50          # lower threshold when col name is a hint
 PROBE_BYTES             = 256 * 1024    # bytes range-read from Azure for probing
 BLOCK_SIZE              = 4 * 1024 * 1024  # 4 MB per Azure block blob block
 
@@ -105,34 +102,11 @@ _NULLSTR: frozenset[str] = frozenset({
 })
 
 
-# ── Boolean lookup tables ─────────────────────────────────────────────────────
-
-_BOOL_TRUE  = frozenset({"yes", "y", "true",  "t", "1", "on",  "enabled",  "active",   "x", "\u2713"})
-_BOOL_FALSE = frozenset({"no",  "n", "false", "f", "0", "off", "disabled", "inactive", " ", "\u2717"})
-_BOOL_ALL   = _BOOL_TRUE | _BOOL_FALSE
-
-
-# ── Column-name heuristic word sets ──────────────────────────────────────────
-
-_DATE_NAME_CLUES: frozenset[str] = frozenset({
-    "date", "dt", "time", "timestamp", "created", "updated", "modified",
-    # NOTE: "period" intentionally excluded — ERP period columns (e.g. GL_PERIOD)
-    # contain values like "JAN-25" which are labels, not parseable calendar dates.
-    # NOTE: "year" and "month" intentionally excluded — PERIOD_YEAR, PERIOD_MONTH,
-    # FISCAL_YEAR are numeric metric columns (2021, 2022 ...) not calendar dates.
-    "dob", "birth", "expir", "effective", "since", "until",
-    "_at", "at_", "start", "end", "from", "to", "week",
-    "day", "posted", "issued", "received", "shipped", "closed",
-})
-_NUM_NAME_CLUES: frozenset[str] = frozenset({
-    "amount", "price", "cost", "total", "sum", "count", "qty", "quantity",
-    "balance", "rate", "pct", "percent", "ratio", "score", "revenue",
-    "profit", "loss", "tax", "fee", "charge", "salary", "wage", "budget",
-    "num", "number", "no.", "vol", "volume",
-})
-
-
 # ── Compiled regex patterns ───────────────────────────────────────────────────
+# Type-detection regex (currency, thousands, percent, Excel date serials, hint
+# tokens) lives in app.services.preprocessor.type_detection — owned by the
+# detectors that use them. Patterns kept here are used by row / cell cleaning
+# (garbage-row removal, control-char stripping) and the header-row scanner.
 
 _GARBAGE_ROW_RE = re.compile(
     r"^\s*(total|grand\s+total|subtotal|sub\s+total|sum|page\s+total|"
@@ -147,22 +121,11 @@ _GARBAGE_ROW_RE = re.compile(
     re.IGNORECASE,
 )
 _SEP_ROW_RE    = re.compile(r"^[-=*_~\s|+]+$")
-_CURRENCY_RE   = re.compile(r"[$\u20b9\u20ac\xa3\xa5\u20a9\u20a6\u20b1\u20ba\u20b4\u20bd\xa2\u0e3f]+")
-_SPACE_THOU_RE = re.compile(r"(\d)\s(\d)")
-_COMMA_THOU_RE = re.compile(r"^[+-]?[\d,]+\.?\d*$")
-_PERCENT_RE    = re.compile(r"^([+-]?\d+\.?\d*)\s*%$")
 _CTRL_RE       = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _INVISIBLE_RE  = re.compile(
     r"[\u200b\u200c\u200d\u200e\u200f\ufeff\u00ad"
     r"\u180e\u2060\u2061\u2062\u2063\u2064\u3000]"
 )
-
-
-# ── Excel date serial constants ───────────────────────────────────────────────
-
-_EXCEL_EPOCH      = datetime(1899, 12, 30)
-_EXCEL_SERIAL_MIN = 7300    # ~Jan 1920
-_EXCEL_SERIAL_MAX = 73000   # ~Dec 2099
 
 
 # ── Result dataclass ──────────────────────────────────────────────────────────
@@ -1262,247 +1225,47 @@ def _drop_garbage_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Type detection + converter builder (uses only the sample; applied to all chunks)
+# Type detection (delegated to the detector registry)
 # ══════════════════════════════════════════════════════════════════════════════
+#
+# All per-column type detection lives in app.services.preprocessor.type_detection.
+# That module owns the IdentifierDetector, BooleanDetector, DateDetector and
+# NumericDetector — each isolated, ordered, and unit-testable. Adding support
+# for a new column type means adding one detector class, not editing this file.
+#
+# This wrapper exists only to (a) preserve the historical (col -> converter_fn)
+# return shape consumed by the chunk-conversion code below, and (b) attach a
+# human-readable warning trail for the per-file ingest log.
+
+from app.services.preprocessor import detect_column_converter  # noqa: E402
 
 ConverterFn = Callable[[object], object]
 
 
-# ── Identifier-column guards ──────────────────────────────────────────────────
-# Columns whose names match these patterns are PURE identifiers (Oracle EBS,
-# SAP, generic ERP). They must be passed through as-is — never coerced to
-# date or even normalized as numeric — because:
-#   - LEDGER_ID values like 2028, 2030 look like years to date detectors
-#     and got stored as 2028-01-01T00:00:00 (real bug we hit)
-#   - INVOICE_NUM with leading zeros ("00012345") would lose them via numeric
-#     normalization
-#   - Any *_KEY / *_CODE may contain mixed alphanumeric IDs
-# Guard runs BEFORE date / numeric detection and forces the column to be
-# left untouched (no converter installed).
-_ID_COL_SUFFIXES: tuple[str, ...] = (
-    "_id", "_num", "_number", "_no", "_key", "_code", "_ref", "_uuid",
-)
-_ID_COL_PREFIXES: tuple[str, ...] = (
-    "ledger_", "code_combination", "voucher", "invoice_num", "invoice_no",
-    "journal_", "transaction_id", "doc_num", "document_num",
-)
-_ID_COL_EXACT: frozenset[str] = frozenset({
-    "id", "uuid", "guid", "sku", "isin", "cusip", "ein", "ssn",
-    "ledger_id", "org_id", "set_of_books_id", "period_name",
-})
-
-
-def _is_identifier_column(col_name: str) -> bool:
-    """True if the column name strongly indicates a pure identifier.
-
-    Identifier columns are passed through verbatim (no date / numeric coercion).
-    """
-    n = col_name.strip().lower()
-    if not n:
-        return False
-    if n in _ID_COL_EXACT:
-        return True
-    if any(n.endswith(suf) for suf in _ID_COL_SUFFIXES):
-        return True
-    if any(n.startswith(pre) for pre in _ID_COL_PREFIXES):
-        return True
-    return False
-
-
 def _build_converters(
-    sample: pd.DataFrame, headers: list[str], warns: list[str],
+    sample: pd.DataFrame,
+    headers: list[str],
+    warns: list[str],
 ) -> dict[str, ConverterFn]:
-    """
-    Inspect sample rows ONCE and return {col: converter_fn}.
-    The returned functions are applied cell-by-cell to every chunk —
-    they do not accumulate state across chunks.
+    """Return the per-column converter map by consulting the detector registry.
+
+    The registry's ordering rule is "identifier first, value-based last", so
+    columns named like IDs (LEDGER_ID, INVOICE_NUM, ...) are never coerced —
+    even when their values happen to look like years or numbers. Columns that
+    no detector claims are intentionally left without a converter; the caller
+    keeps them as raw strings.
     """
     converters: dict[str, ConverterFn] = {}
     for col in headers:
         if col not in sample.columns:
             continue
-
-        # ── Identifier columns: NEVER coerce. Preserve raw value as string. ──
-        # This prevents LEDGER_ID=2028 from becoming "2028-01-01T00:00:00",
-        # INVOICE_NUM=00012345 from losing its leading zeros, etc.
-        if _is_identifier_column(col):
-            warns.append(f"Column '{col}': preserved as identifier (no type coercion)")
+        sample_values = sample[col].dropna()
+        result = detect_column_converter(col, sample_values)
+        if result is None:
             continue
-
-        series    = sample[col].dropna()
-        col_lower = col.lower()
-        if series.empty:
-            continue
-
-        unique_lower = {str(v).strip().lower() for v in series}
-
-        # ── Bool ──────────────────────────────────────────────────────────────
-        if unique_lower and unique_lower.issubset(_BOOL_ALL):
-            converters[col] = _make_bool_converter()
-            continue
-
-        # ── Date ──────────────────────────────────────────────────────────────
-        is_date_hint = any(h in col_lower for h in _DATE_NAME_CLUES)
-        threshold    = DATE_CONVERT_THRESHOLD if is_date_hint else 0.80
-        ratio        = _date_parse_ratio(series)
-        if ratio >= threshold:
-            n_failed = int(len(series) * (1 - ratio))
-            if n_failed:
-                warns.append(
-                    f"Column '{col}': ~{n_failed} date value(s) in sample could not be parsed"
-                )
-            converters[col] = _make_date_converter()
-            continue
-
-        # ── Numeric ───────────────────────────────────────────────────────────
-        num_thresh = (NUM_HINT_THRESHOLD
-                      if any(h in col_lower for h in _NUM_NAME_CLUES)
-                      else NUM_CONVERT_THRESHOLD)
-        if _numeric_parse_ratio(series) >= num_thresh:
-            converters[col] = _make_numeric_converter()
-            continue
-
+        if result.type_name == "identifier":
+            warns.append(
+                f"Column '{col}': preserved as identifier (no type coercion)"
+            )
+        converters[col] = result.convert
     return converters
-
-
-# ── Bool ──────────────────────────────────────────────────────────────────────
-
-def _make_bool_converter() -> ConverterFn:
-    def _fn(v: object) -> object:
-        if v is None:
-            return None
-        sv = str(v).strip().lower()
-        if sv in _BOOL_TRUE:  return "True"
-        if sv in _BOOL_FALSE: return "False"
-        return None
-    return _fn
-
-
-# ── Date ──────────────────────────────────────────────────────────────────────
-
-def _excel_serial_to_iso(n: float) -> str | None:
-    try:
-        ni = int(n)
-        if not (_EXCEL_SERIAL_MIN <= ni <= _EXCEL_SERIAL_MAX):
-            return None
-        dt = _EXCEL_EPOCH + timedelta(days=ni)
-        return dt.strftime("%Y-%m-%d") if 1900 <= dt.year <= 2100 else None
-    except (ValueError, OverflowError, OSError):
-        return None
-
-
-def _parse_one_date(v: object) -> str | None:
-    if v is None:
-        return None
-    if isinstance(v, datetime):
-        return v.strftime("%Y-%m-%d") if 1900 <= v.year <= 2100 else None
-    if isinstance(v, _date_type):
-        return v.isoformat() if 1900 <= v.year <= 2100 else None
-    sv = str(v).strip()
-    if not sv or sv.lower() in _NULLSTR:
-        return None
-    # MON-YY / MON-YYYY are ERP period labels (e.g. "JAN-25", "FEB-2025"),
-    # not parseable calendar dates.  Return None to prevent corruption.
-    if re.match(r'^[A-Za-z]{3}-\d{2,4}$', sv):
-        return None
-    # Plain 4-digit year integers (1900-2100) have no month/day context.
-    # dateutil would silently default them to Jan 1 — almost always wrong
-    # for ERP columns like PERIOD_YEAR, LEDGER_ID, FISCAL_YEAR.
-    if re.match(r'^\d{4}$', sv):
-        return None
-    try:
-        f = float(sv.replace(",", ""))
-        if f == int(f):
-            result = _excel_serial_to_iso(f)
-            if result:
-                return result
-    except (ValueError, TypeError):
-        pass
-    try:
-        from dateutil import parser as _dp  # noqa: PLC0415
-        # Require at least one digit: pure text like "January" has none and would
-        # be silently defaulted to 1900-01-01 by dateutil — wrong output.
-        if any(c.isdigit() for c in sv):
-            parsed = _dp.parse(sv, default=datetime(1900, 1, 1), dayfirst=False)
-            # Exclude exactly 1900 — dateutil uses it as its fill-in default,
-            # so a parsed year of 1900 almost always means the input had no year.
-            return parsed.strftime("%Y-%m-%d") if 1901 <= parsed.year <= 2100 else None
-    except Exception:
-        pass
-    for fmt in (
-        "%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%Y/%m/%d",
-        "%d-%m-%Y", "%m-%d-%Y", "%d.%m.%Y", "%m.%d.%Y",
-        "%Y%m%d", "%d %b %Y", "%b %d %Y", "%d %B %Y", "%B %d %Y",
-        "%b-%d-%Y", "%d-%b-%Y", "%b %Y", "%B %Y",
-    ):
-        try:
-            parsed = datetime.strptime(sv, fmt)
-            return parsed.strftime("%Y-%m-%d") if 1900 <= parsed.year <= 2100 else None
-        except ValueError:
-            pass
-    return None
-
-
-def _date_parse_ratio(series: pd.Series) -> float:
-    return series.apply(_parse_one_date).notna().sum() / max(len(series), 1)
-
-
-def _make_date_converter() -> ConverterFn:
-    def _fn(v: object) -> object:
-        return _parse_one_date(v)
-    return _fn
-
-
-# ── Numeric ───────────────────────────────────────────────────────────────────
-
-def _strip_numeric_noise(raw: str) -> str | None:
-    v = _INVISIBLE_RE.sub("", raw.strip())
-    v = unicodedata.normalize("NFKC", v)
-    m = _PERCENT_RE.match(v)
-    if m:
-        try:
-            return str(round(float(m.group(1)) / 100, 12))
-        except ValueError:
-            pass
-    v = _CURRENCY_RE.sub("", v).strip()
-    v = _SPACE_THOU_RE.sub(r"\1\2", v)
-    if _COMMA_THOU_RE.match(v):
-        v = v.replace(",", "")
-    return v.strip() or None
-
-
-def _numeric_parse_ratio(series: pd.Series) -> float:
-    def _parseable(v: object) -> bool:
-        if v is None:
-            return False
-        cleaned = _strip_numeric_noise(str(v))
-        if not cleaned:
-            return False
-        try:
-            float(cleaned)
-            return True
-        except (ValueError, TypeError):
-            return False
-    return series.apply(_parseable).sum() / max(len(series), 1)
-
-
-def _make_numeric_converter() -> ConverterFn:
-    def _fn(v: object) -> object:
-        if v is None:
-            return None
-        sv = str(v).strip()
-        if not sv:
-            return None
-        cleaned = _strip_numeric_noise(sv)
-        if not cleaned:
-            return v
-        try:
-            f = float(cleaned)
-            if np.isnan(f) or np.isinf(f):
-                return None
-            if f == int(f) and "." not in cleaned:
-                return str(int(f))
-            return str(f)
-        except (ValueError, OverflowError):
-            return v
-    return _fn

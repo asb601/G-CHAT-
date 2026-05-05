@@ -40,6 +40,26 @@ _MAX_LLM_RETRIES = 3
 _RETRY_BASE_DELAY = 5  # seconds, doubles each retry
 
 
+def _should_escalate_to_primary(messages: list) -> bool:
+    """Return True iff the last run_sql ToolMessage was an error or 0-row result.
+
+    Rationale: gpt-4o-mini handles 90%+ of SQL turns correctly and is ~16x cheaper
+    on input tokens. We only pay for gpt-4o when mini's previous attempt actually
+    failed — retrying with the same model would likely repeat the mistake.
+    For schema / catalog tool results, mini is always sufficient.
+    """
+    for m in reversed(messages):
+        if not isinstance(m, ToolMessage):
+            continue
+        if getattr(m, "name", "") != "run_sql":
+            return False  # last tool was schema/catalog — mini is fine
+        content = m.content if isinstance(m.content, str) else str(m.content)
+        return ('"error"' in content
+                or '"row_count": 0' in content
+                or '"total_rows": 0' in content)
+    return False  # turn 1, no prior tool calls — mini handles intent + first SQL
+
+
 def build_agent_node(all_tools: list):
     """Create the async agent node closure with all tools pre-bound."""
 
@@ -48,10 +68,11 @@ def build_agent_node(all_tools: list):
         if count >= MAX_TOOL_CALLS:
             return {"messages": [AIMessage(content="I've gathered enough data. Let me summarise.")]}
 
-        # Pick model: gpt-4o on turn 1 (intent + file selection matters most),
-        # gpt-4o-mini on follow-up turns (cheaper, still capable for SQL + answers).
+        # Model selection: default to gpt-4o-mini for cost. Escalate to gpt-4o
+        # only when the previous run_sql errored or returned zero rows.
         primary_llm = get_llm()
-        active_llm = primary_llm if state.get("is_first_turn", True) else get_llm_mini()
+        escalate = _should_escalate_to_primary(state["messages"])
+        active_llm = primary_llm if escalate else get_llm_mini()
         llm_with_tools = active_llm.bind_tools(all_tools)
 
         # ── Log every message going into the LLM this iteration ──────────────

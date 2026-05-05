@@ -12,12 +12,10 @@ from app.core.logger import pipeline_logger
 from app.retrieval.embeddings import build_search_text
 
 # Hard cap on how many files search_catalog returns to the LLM.
-_MAX_RESULTS = 15
-# How many lookup / master / dimension files to surface unconditionally,
-# even if they did not score on the user's query tokens.  Protects against
-# vocabulary mismatches between the user's question (e.g. SAP "customer
-# master") and the file's metadata (e.g. Oracle EBS "parties / party_name").
-_LOOKUP_PAD_SLOTS = 5
+# Was 15 — cut to 10 to trim token cost when search_catalog is called.
+_MAX_RESULTS = 10
+# Lookup / master files padded unconditionally (was 5 — cut to 3).
+_LOOKUP_PAD_SLOTS = 3
 
 
 def _match_score(query: str, file_entry: dict) -> tuple[int, list[str]]:
@@ -30,7 +28,15 @@ def _match_score(query: str, file_entry: dict) -> tuple[int, list[str]]:
     matched_tokens = [token for token in query_tokens if token in search_text]
     score = len(matched_tokens)
 
-    column_names = [c.get("name", "") for c in (file_entry.get("columns_info") or []) if isinstance(c, dict)]
+    # Boost when the query token appears in a column name. Accept either the
+    # heavy `columns_info` shape OR the lean `column_names` shape — the lean
+    # one is what cached catalog entries carry.
+    column_names: list[str] = []
+    for c in (file_entry.get("columns_info") or []):
+        if isinstance(c, dict) and c.get("name"):
+            column_names.append(c["name"])
+    if not column_names:
+        column_names = [c for c in (file_entry.get("column_names") or []) if isinstance(c, str)]
     column_text = " ".join(column_names).lower()
     score += sum(2 for token in query_tokens if token in column_text)
 
@@ -65,17 +71,26 @@ def build_catalog_tools(
             return json.dumps({"error": "No files have been ingested yet."})
 
         def _entry(f: dict, score: int, matched_terms: list[str]) -> dict:
+            # Read column names from either shape (heavy or lean cache).
+            cols = [
+                c.get("name", "")
+                for c in (f.get("columns_info") or [])
+                if isinstance(c, dict) and c.get("name")
+            ]
+            if not cols:
+                cols = [c for c in (f.get("column_names") or []) if isinstance(c, str)]
             return {
                 "match_score": score,
                 "matched_terms": matched_terms,
                 "blob_path": f["blob_path"],
                 "sql_path": _sql_path(f["blob_path"]),
-                "description": f.get("ai_description", ""),
-                "columns": [c["name"] for c in (f.get("columns_info") or [])],
-                "key_metrics": f.get("key_metrics") or [],
-                "key_dimensions": f.get("key_dimensions") or [],
-                "good_for": f.get("good_for") or [],
-                "date_range": f"{f.get('date_range_start')} → {f.get('date_range_end')}",
+                "description": (f.get("ai_description") or "")[:300],  # cap at 300 chars
+                "columns": cols,
+                # Only include non-empty metadata to keep the payload small
+                **({"key_metrics": f["key_metrics"]} if f.get("key_metrics") else {}),
+                **({"key_dimensions": f["key_dimensions"]} if f.get("key_dimensions") else {}),
+                **({"good_for": f["good_for"][:3]} if f.get("good_for") else {}),
+                "date_range": f"{f.get('date_range_start')} \u2192 {f.get('date_range_end')}",
             }
 
         # Score every file once.  Keep all files (do NOT drop score==0) so
@@ -187,6 +202,20 @@ def build_catalog_tools(
                 "sample_values": c.get("sample_values", [])[:5],
                 "unique_count": len(c.get("unique_values", [])),
             })
+
+        # If columns_info wasn't hydrated for this file (file outside the
+        # request shortlist), fall back to the lean column_names list and
+        # tell the agent to use inspect_column for any column it needs to
+        # filter on. Names alone are still enough to pick a column.
+        if not cols:
+            for name in (match.get("column_names") or []):
+                cols.append({
+                    "name": name,
+                    "type": "unknown",
+                    "sample_values": [],
+                    "unique_count": 0,
+                    "hint": "Call inspect_column(blob_path, name) for type and sample values.",
+                })
 
         pipeline_logger.info(
             "get_file_schema",

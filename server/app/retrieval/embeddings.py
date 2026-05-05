@@ -162,16 +162,22 @@ def build_search_text(metadata: _AnyMetadata) -> str:
     if desc:
         parts.append(desc)
 
-    # Column names
-    cols_info = _get_list("columns_info")
-    col_names = []
-    for c in cols_info:
+    # Column names — accept either the heavy `columns_info` shape (list of
+    # {name, type, sample_values, ...} dicts) used by the FileMetadata ORM
+    # row or the lean `column_names` list-of-strings shape used by the
+    # cached catalog entries.
+    col_names: list[str] = []
+    for c in _get_list("columns_info"):
         if isinstance(c, dict):
             col_names.append(c.get("name", ""))
         elif isinstance(c, str):
             col_names.append(c)
+    if not col_names:
+        for c in _get_list("column_names"):
+            if isinstance(c, str):
+                col_names.append(c)
     if col_names:
-        parts.append(" ".join(col_names))
+        parts.append(" ".join(n for n in col_names if n))
 
     # good_for topics
     good_for = _get_list("good_for")

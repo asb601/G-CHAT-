@@ -76,10 +76,17 @@ def is_lookup_file(entry: dict) -> bool:
     desc = (entry.get("ai_description") or "").lower()
     if any(kw in desc for kw in LOOKUP_KEYWORDS):
         return True
+    # Accept either the heavy `columns_info` (list of dicts) shape OR the
+    # lean `column_names` (list of strings) shape used by cached catalog
+    # entries.
+    col_names: list[str] = []
     for col in (entry.get("columns_info") or []):
-        if not isinstance(col, dict):
-            continue
-        name = (col.get("name") or "").lower()
-        if any(name.endswith(sfx) for sfx in NAME_COLUMN_SUFFIXES):
+        if isinstance(col, dict) and col.get("name"):
+            col_names.append(col["name"])
+    if not col_names:
+        col_names = [c for c in (entry.get("column_names") or []) if isinstance(c, str)]
+    for name in col_names:
+        n = name.lower()
+        if any(n.endswith(sfx) for sfx in NAME_COLUMN_SUFFIXES):
             return True
     return False

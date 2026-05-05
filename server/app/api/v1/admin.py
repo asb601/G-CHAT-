@@ -116,11 +116,13 @@ async def reingest_all(
     await db.execute(delete(FileAnalytics))
     await db.execute(delete(FileMetadata))
 
-    # Reset ingest status
+    # Reset ingest status AND preprocessed flag so the preprocessor actually runs again.
+    # Without resetting is_preprocessed, ingest_file skips preprocessing entirely
+    # and re-reads the already-preprocessed (possibly corrupted) CSV blob as-is.
     await db.execute(
         update(File)
         .where(File.id.in_(file_ids))
-        .values(ingest_status="not_ingested")
+        .values(ingest_status="not_ingested", is_preprocessed=False)
     )
     await db.commit()
     invalidate_catalog_cache()

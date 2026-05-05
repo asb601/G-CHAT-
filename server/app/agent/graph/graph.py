@@ -19,6 +19,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.catalog_cache import invalidate_catalog_cache, load_catalog  # re-export
+from app.agent.catalog_hydration import hydrate_files, merge_hydrated
 from app.agent.graph.graph_builder import build_graph
 from app.agent.llm import get_llm_mini
 from app.agent.prompts.prompt_builder import build_system_prompt
@@ -33,6 +34,7 @@ from app.agent.response_helpers import (
 )
 from app.agent.state import AgentState
 from app.agent.tools.catalog import build_catalog_tools
+from app.agent.tools.column import build_column_tool
 from app.agent.tools.sample import build_sample_tool
 from app.agent.tools.sql import build_sql_tools
 from app.agent.tools.stats import build_stats_tool
@@ -110,7 +112,6 @@ async def _build_agent_context(
     container_name = cached["container_name"]
     parquet_blob_path = cached["parquet_blob_path"]
     all_parquet_paths = cached["parquet_paths_all"]
-    sample_rows_by_blob = cached["sample_rows_by_blob"]
 
     # ── STEP 2.5: RETRIEVAL — filter catalog to top-K relevant files ─────────
     # Run the 9-stage retrieval pipeline (temporal → BM25 → fuzzy → vector →
@@ -208,6 +209,26 @@ async def _build_agent_context(
             fallback_files=[e.get("blob_path") for e in catalog],
         )
 
+    # ── STEP 2.6: HYDRATE HEAVY FIELDS for the shortlist only ───────────────
+    # The cached catalog is intentionally lean (no columns_info samples,
+    # sample_rows, or column_stats). We now load those heavy fields ONLY for
+    # the K shortlisted files. At ~10 KB per record this stays bounded
+    # (≤300 KB per request) regardless of total catalog size.
+    shortlist_ids = [e["file_id"] for e in catalog if e.get("file_id")]
+    heavy_by_file = await hydrate_files(db, shortlist_ids)
+    catalog = [merge_hydrated(e, heavy_by_file.get(e.get("file_id"))) for e in catalog]
+    sample_rows_by_blob = {
+        e["blob_path"]: e.get("sample_rows") or []
+        for e in catalog
+        if e.get("blob_path") and e.get("sample_rows")
+    }
+    pipeline_logger.info(
+        "catalog_hydrated",
+        shortlist_size=len(catalog),
+        hydrated_files=len(heavy_by_file),
+        sample_rows_files=len(sample_rows_by_blob),
+    )
+
     # Per-request state store
     req_id = uuid.uuid4().hex
     store: dict = {}
@@ -217,8 +238,15 @@ async def _build_agent_context(
     # Build tools
     all_tools = []
     all_tools.extend(build_sql_tools(connection_string, container_name, parquet_blob_path, store))
-    # search_catalog tool uses the full catalog so it can find any file
+    # search_catalog uses the lean full catalog so it can find any file
+    # without paying the heavy-field cost.
     all_tools.extend(build_catalog_tools(full_catalog, all_parquet_paths, container_name))
+    # inspect_column lets the agent pull dtype/samples/suggested predicate
+    # for any column on demand. Replaces the long DuckDB / date-format
+    # rules that used to live as prose in the system prompt.
+    all_tools.extend(
+        build_column_tool(catalog, all_parquet_paths, container_name, connection_string)
+    )
     all_tools.extend(build_stats_tool(store))
     all_tools.extend(build_sample_tool(sample_rows_by_blob))
 
@@ -256,9 +284,10 @@ async def _build_agent_context(
         "tool_call_count": 0,
         "request_id": req_id,
         "broaden_nudges": 0,
-        # Always use gpt-4o for all SQL generation turns — mini is used only
-        # for the final polish pass after the answer is fully assembled.
-        "is_first_turn": True,
+        # Model selection is now error-driven (see _should_escalate_to_primary in
+        # graph_builder.py). is_first_turn is kept for backward state-shape compat
+        # but no longer controls which LLM gets called.
+        "is_first_turn": False,
     }
 
     return {

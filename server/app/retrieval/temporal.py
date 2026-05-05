@@ -260,8 +260,9 @@ _PATTERNS: list[tuple] = [
     # --- Q2 2024 / Q2FY25 / Q2 FY2025 ---
     (_p(r"\bq([1-4])\s*(?:fy|fiscal\s*year\s*)(\d{2,4})\b"), _h_qN_year),
     (_p(r"\bq([1-4])\s+(\d{4})\b"),        _h_qN_year),
-    # --- FY2025 / FY25 ---
+    # --- FY2025 / FY25 / Fiscal Year 2025 / fiscal year 25 ---
     (_p(r"\bfy\s*(\d{2,4})\b"),            _h_fy_year),
+    (_p(r"\bfiscal\s+year\s+(\d{2,4})\b"), _h_fy_year),
     # --- Month Year: March 2024 / Mar 2024 ---
     (_p(r"\b(january|february|march|april|may|june|july|august|september|"
         r"october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)"
