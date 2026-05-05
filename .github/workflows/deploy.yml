@@ -11,6 +11,7 @@ jobs:
     steps:
       - name: Deploy to Azure VM
         uses: appleboy/ssh-action@v1.0.3
+        
         with:
           host: ${{ secrets.VM_HOST }}
           username: ${{ secrets.VM_USER }}
